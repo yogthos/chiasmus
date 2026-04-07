@@ -11,6 +11,9 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { SolverSession } from "./solvers/session.js";
 import { SkillLibrary } from "./skills/library.js";
+import { FormalizationEngine } from "./formalize/engine.js";
+import { createLLMFromEnv } from "./llm/anthropic.js";
+import type { LLMAdapter } from "./llm/types.js";
 import type { SolverResult } from "./solvers/types.js";
 
 export function getChiasmusHome(): string {
@@ -111,6 +114,55 @@ EXAMPLES:
       },
     },
   },
+  {
+    name: "chiasmus_formalize",
+    description: `Find the best formalization template for a problem and return it with slot-filling instructions.
+
+This is a GUIDED workflow: the tool finds the right template and tells you how to fill it.
+You then fill the slots and submit the result via chiasmus_verify.
+
+WORKFLOW:
+  1. Call chiasmus_formalize with your problem description
+  2. Read the returned template, slots, and normalization guidance
+  3. Fill the template slots based on the guidance
+  4. Submit the filled specification via chiasmus_verify
+
+Use this when you want full control over the formalization process.`,
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        problem: {
+          type: "string",
+          description: "Natural language description of the problem to formalize",
+        },
+      },
+      required: ["problem"],
+    },
+  },
+  {
+    name: "chiasmus_solve",
+    description: `End-to-end: formalize a problem and verify it automatically.
+
+Uses an LLM to select a template, fill slots, and run the correction loop.
+Requires ANTHROPIC_API_KEY to be set. Without it, falls back to returning
+template instructions (same as chiasmus_formalize).
+
+WHEN TO USE:
+  - You want a fully automated solve pipeline
+  - The problem maps to a known domain (authorization, config, dependency, rules, reachability)
+
+Returns the verified solver result, the template used, and correction loop history.`,
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        problem: {
+          type: "string",
+          description: "Natural language description of the problem to solve",
+        },
+      },
+      required: ["problem"],
+    },
+  },
 ];
 
 async function handleVerify(args: Record<string, unknown>): Promise<CallToolResult> {
@@ -166,7 +218,6 @@ function handleSkills(
   const domain = args.domain as string | undefined;
   const solver = args.solver as "z3" | "prolog" | undefined;
 
-  // Exact name lookup
   if (name) {
     const result = library.get(name);
     if (!result) {
@@ -179,7 +230,6 @@ function handleSkills(
     };
   }
 
-  // Search or list
   if (query) {
     const results = library.search(query, { domain, solver });
     return {
@@ -187,7 +237,6 @@ function handleSkills(
     };
   }
 
-  // No query or name — list all, optionally filtered
   let all = library.list();
   if (domain) all = all.filter((s) => s.template.domain === domain);
   if (solver) all = all.filter((s) => s.template.solver === solver);
@@ -197,11 +246,93 @@ function handleSkills(
   };
 }
 
+async function handleFormalize(
+  formalizer: FormalizationEngine,
+  args: Record<string, unknown>,
+): Promise<CallToolResult> {
+  const problem = args.problem as string;
+  if (!problem) {
+    return {
+      content: [{ type: "text", text: JSON.stringify({ error: "The 'problem' parameter is required" }) }],
+    };
+  }
+
+  const result = await formalizer.formalize(problem);
+  return {
+    content: [{
+      type: "text",
+      text: JSON.stringify({
+        template: result.template.name,
+        solver: result.template.solver,
+        domain: result.template.domain,
+        instructions: result.instructions,
+      }, null, 2),
+    }],
+  };
+}
+
+async function handleSolve(
+  formalizer: FormalizationEngine | null,
+  library: SkillLibrary,
+  args: Record<string, unknown>,
+): Promise<CallToolResult> {
+  const problem = args.problem as string;
+  if (!problem) {
+    return {
+      content: [{ type: "text", text: JSON.stringify({ error: "The 'problem' parameter is required" }) }],
+    };
+  }
+
+  // If no LLM configured, fall back to formalize
+  if (!formalizer) {
+    const dummyEngine = new FormalizationEngine(library, {
+      async complete() { return ""; },
+    });
+    const result = await dummyEngine.formalize(problem);
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify({
+          fallback: true,
+          message: "No ANTHROPIC_API_KEY set. Returning template instructions instead. Fill the slots and use chiasmus_verify.",
+          template: result.template.name,
+          solver: result.template.solver,
+          instructions: result.instructions,
+        }, null, 2),
+      }],
+    };
+  }
+
+  const result = await formalizer.solve(problem);
+  return {
+    content: [{
+      type: "text",
+      text: JSON.stringify({
+        converged: result.converged,
+        rounds: result.rounds,
+        templateUsed: result.templateUsed,
+        result: result.result,
+        answers: result.answers,
+        history: result.history.map((h) => ({
+          round: h.round,
+          status: h.result.status,
+          error: h.result.status === "error" ? h.result.error : undefined,
+        })),
+      }, null, 2),
+    }],
+  };
+}
+
 export async function createChiasmusServer(
   chiasmusHome?: string,
-): Promise<{ server: Server; library: SkillLibrary }> {
+  llmOverride?: LLMAdapter | null,
+): Promise<{ server: Server; library: SkillLibrary; formalizer: FormalizationEngine | null }> {
   const home = chiasmusHome ?? getChiasmusHome();
   const library = await SkillLibrary.create(home);
+
+  // Use override if provided, otherwise try env
+  const llm = llmOverride !== undefined ? llmOverride : createLLMFromEnv();
+  const formalizer = llm ? new FormalizationEngine(library, llm) : null;
 
   const server = new Server(
     { name: "chiasmus", version: "0.1.0" },
@@ -212,6 +343,11 @@ export async function createChiasmusServer(
     tools: TOOLS,
   }));
 
+  // FormalizationEngine for formalize tool (always available, uses dummy LLM for template selection only)
+  const formalizeEngine = new FormalizationEngine(library, llm ?? {
+    async complete() { return ""; },
+  });
+
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
 
@@ -220,6 +356,10 @@ export async function createChiasmusServer(
         return handleVerify(args ?? {});
       case "chiasmus_skills":
         return handleSkills(library, args ?? {});
+      case "chiasmus_formalize":
+        return handleFormalize(formalizeEngine, args ?? {});
+      case "chiasmus_solve":
+        return handleSolve(formalizer, library, args ?? {});
       default:
         return {
           content: [
@@ -229,7 +369,7 @@ export async function createChiasmusServer(
     }
   });
 
-  return { server, library };
+  return { server, library, formalizer };
 }
 
 // CLI entry point

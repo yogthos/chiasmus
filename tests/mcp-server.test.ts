@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createChiasmusServer } from "../src/mcp-server.js";
+import { MockLLMAdapter } from "../src/llm/mock.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,11 +12,21 @@ describe("Chiasmus MCP Server", () => {
   let client: Client;
   let library: SkillLibrary;
   let tempDir: string;
+  let mockLLM: MockLLMAdapter;
   let cleanup: () => Promise<void>;
 
   beforeAll(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "chiasmus-mcp-test-"));
-    const { server, library: lib } = await createChiasmusServer(tempDir);
+    mockLLM = new MockLLMAdapter();
+    mockLLM.onMatch(/./, `
+(declare-const x Int)
+(declare-const y Int)
+(assert (= (+ x y) 10))
+(assert (> x 0))
+(assert (> y 0))
+    `.trim());
+
+    const { server, library: lib } = await createChiasmusServer(tempDir, mockLLM);
     library = lib;
 
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -221,6 +232,74 @@ describe("Chiasmus MCP Server", () => {
       const content = result.content as Array<{ type: string; text: string }>;
       const parsed = JSON.parse(content[0].text);
       expect(parsed.error).toMatch(/not found/i);
+    });
+  });
+
+  describe("chiasmus_formalize", () => {
+    it("lists chiasmus_formalize in available tools", async () => {
+      const tools = await client.listTools();
+      const names = tools.tools.map((t) => t.name);
+      expect(names).toContain("chiasmus_formalize");
+    });
+
+    it("returns template and instructions for a problem", async () => {
+      const result = await client.callTool({
+        name: "chiasmus_formalize",
+        arguments: {
+          problem: "Check if access control rules can ever conflict",
+        },
+      });
+
+      const content = result.content as Array<{ type: string; text: string }>;
+      const parsed = JSON.parse(content[0].text);
+      expect(parsed.template).toBe("policy-contradiction");
+      expect(parsed.solver).toBe("z3");
+      expect(parsed.instructions).toContain("SLOT");
+    });
+
+    it("returns error when problem is missing", async () => {
+      const result = await client.callTool({
+        name: "chiasmus_formalize",
+        arguments: {},
+      });
+
+      const content = result.content as Array<{ type: string; text: string }>;
+      const parsed = JSON.parse(content[0].text);
+      expect(parsed.error).toMatch(/problem/i);
+    });
+  });
+
+  describe("chiasmus_solve", () => {
+    it("lists chiasmus_solve in available tools", async () => {
+      const tools = await client.listTools();
+      const names = tools.tools.map((t) => t.name);
+      expect(names).toContain("chiasmus_solve");
+    });
+
+    it("solves a problem end-to-end with mock LLM", async () => {
+      const result = await client.callTool({
+        name: "chiasmus_solve",
+        arguments: {
+          problem: "Find two positive integers that add to 10",
+        },
+      });
+
+      const content = result.content as Array<{ type: string; text: string }>;
+      const parsed = JSON.parse(content[0].text);
+      expect(parsed.converged).toBe(true);
+      expect(parsed.result.status).toBe("sat");
+      expect(parsed.templateUsed).toBeTruthy();
+    });
+
+    it("returns error when problem is missing", async () => {
+      const result = await client.callTool({
+        name: "chiasmus_solve",
+        arguments: {},
+      });
+
+      const content = result.content as Array<{ type: string; text: string }>;
+      const parsed = JSON.parse(content[0].text);
+      expect(parsed.error).toMatch(/problem/i);
     });
   });
 });
