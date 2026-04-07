@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -8,7 +10,12 @@ import {
   type CallToolResult,
 } from "@modelcontextprotocol/sdk/types.js";
 import { SolverSession } from "./solvers/session.js";
+import { SkillLibrary } from "./skills/library.js";
 import type { SolverResult } from "./solvers/types.js";
+
+export function getChiasmusHome(): string {
+  return process.env.CHIASMUS_HOME ?? join(homedir(), ".chiasmus");
+}
 
 const TOOLS = [
   {
@@ -63,6 +70,47 @@ EXAMPLES:
       required: ["solver", "input"],
     },
   },
+  {
+    name: "chiasmus_skills",
+    description: `Search and list formalization templates in the skill library.
+
+Returns matching templates with their skeletons, slot definitions, normalization recipes,
+and usage metadata (reuse count, success rate).
+
+Use this to find an appropriate template before calling chiasmus_verify or chiasmus_solve.
+
+EXAMPLES:
+  Search for authorization templates:
+    query: "check if access control policies conflict"
+
+  List all Prolog templates:
+    solver: "prolog"
+
+  Get a specific template:
+    name: "policy-contradiction"`,
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        query: {
+          type: "string",
+          description: "Natural language search query to find relevant templates",
+        },
+        name: {
+          type: "string",
+          description: "Get a specific template by exact name (overrides query)",
+        },
+        domain: {
+          type: "string",
+          description: "Filter by domain (authorization, configuration, dependency, validation, rules, analysis)",
+        },
+        solver: {
+          type: "string",
+          enum: ["z3", "prolog"],
+          description: "Filter by solver type",
+        },
+      },
+    },
+  },
 ];
 
 async function handleVerify(args: Record<string, unknown>): Promise<CallToolResult> {
@@ -109,7 +157,52 @@ async function handleVerify(args: Record<string, unknown>): Promise<CallToolResu
   };
 }
 
-export function createChiasmusServer(): Server {
+function handleSkills(
+  library: SkillLibrary,
+  args: Record<string, unknown>,
+): CallToolResult {
+  const name = args.name as string | undefined;
+  const query = args.query as string | undefined;
+  const domain = args.domain as string | undefined;
+  const solver = args.solver as "z3" | "prolog" | undefined;
+
+  // Exact name lookup
+  if (name) {
+    const result = library.get(name);
+    if (!result) {
+      return {
+        content: [{ type: "text", text: JSON.stringify({ error: `Template "${name}" not found` }) }],
+      };
+    }
+    return {
+      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+    };
+  }
+
+  // Search or list
+  if (query) {
+    const results = library.search(query, { domain, solver });
+    return {
+      content: [{ type: "text", text: JSON.stringify(results, null, 2) }],
+    };
+  }
+
+  // No query or name — list all, optionally filtered
+  let all = library.list();
+  if (domain) all = all.filter((s) => s.template.domain === domain);
+  if (solver) all = all.filter((s) => s.template.solver === solver);
+
+  return {
+    content: [{ type: "text", text: JSON.stringify(all, null, 2) }],
+  };
+}
+
+export async function createChiasmusServer(
+  chiasmusHome?: string,
+): Promise<{ server: Server; library: SkillLibrary }> {
+  const home = chiasmusHome ?? getChiasmusHome();
+  const library = await SkillLibrary.create(home);
+
   const server = new Server(
     { name: "chiasmus", version: "0.1.0" },
     { capabilities: { tools: {} } }
@@ -125,6 +218,8 @@ export function createChiasmusServer(): Server {
     switch (name) {
       case "chiasmus_verify":
         return handleVerify(args ?? {});
+      case "chiasmus_skills":
+        return handleSkills(library, args ?? {});
       default:
         return {
           content: [
@@ -134,7 +229,7 @@ export function createChiasmusServer(): Server {
     }
   });
 
-  return server;
+  return { server, library };
 }
 
 // CLI entry point
@@ -144,7 +239,7 @@ const isMain =
     process.argv[1].endsWith("mcp-server.js"));
 
 if (isMain) {
-  const server = createChiasmusServer();
+  const { server } = await createChiasmusServer();
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error("[Chiasmus] MCP server running on stdio");
