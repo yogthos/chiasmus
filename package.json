@@ -1,0 +1,44 @@
+{
+  "name": "chiasmus",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Neurosymbolic verification engine - MCP server for formal reasoning with Z3 and Tau Prolog",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "chiasmus": "dist/mcp-server.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest",
+    "test:run": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "mcp": "tsx src/mcp-server.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "mcp",
+    "z3",
+    "prolog",
+    "formal-verification",
+    "neurosymbolic",
+    "smt",
+    "solver"
+  ],
+  "license": "MIT",
+  "author": "yogthos",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "tau-prolog": "^0.3.4",
+    "z3-solver": "^4.16.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^4.0.17"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
