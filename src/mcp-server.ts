@@ -12,6 +12,7 @@ import {
 import { SolverSession } from "./solvers/session.js";
 import { SkillLibrary } from "./skills/library.js";
 import { FormalizationEngine } from "./formalize/engine.js";
+import { SkillLearner } from "./skills/learner.js";
 import { createLLMFromEnv } from "./llm/anthropic.js";
 import type { LLMAdapter } from "./llm/types.js";
 import type { SolverResult } from "./solvers/types.js";
@@ -161,6 +162,41 @@ Returns the verified solver result, the template used, and correction loop histo
         },
       },
       required: ["problem"],
+    },
+  },
+  {
+    name: "chiasmus_learn",
+    description: `Extract a reusable template from a verified solution and add it to the skill library.
+
+After solving a problem with chiasmus_verify, call this to generalize the solution into a
+reusable template. The template is stored as a candidate — it gets promoted to full status
+after being successfully reused ${3} times.
+
+Requires ANTHROPIC_API_KEY for template extraction (uses LLM to generalize).
+
+WORKFLOW:
+  1. Solve a problem with chiasmus_verify
+  2. Call chiasmus_learn with the verified spec and problem description
+  3. The extracted template appears in chiasmus_skills searches
+  4. Future similar problems can use the template via chiasmus_formalize`,
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        solver: {
+          type: "string",
+          enum: ["z3", "prolog"],
+          description: "Which solver was used for the verified spec",
+        },
+        spec: {
+          type: "string",
+          description: "The verified formal specification to generalize",
+        },
+        problem: {
+          type: "string",
+          description: "Natural language description of the problem that was solved",
+        },
+      },
+      required: ["solver", "spec", "problem"],
     },
   },
 ];
@@ -337,6 +373,64 @@ async function handleSolve(
   };
 }
 
+async function handleLearn(
+  learner: SkillLearner | null,
+  args: Record<string, unknown>,
+): Promise<CallToolResult> {
+  if (!learner) {
+    return {
+      content: [{ type: "text", text: JSON.stringify({
+        error: "No ANTHROPIC_API_KEY set. chiasmus_learn requires an LLM for template extraction.",
+      }) }],
+    };
+  }
+
+  const solver = args.solver as string;
+  const spec = args.spec as string;
+  const problem = args.problem as string;
+
+  if (!solver || !spec || !problem) {
+    return {
+      content: [{ type: "text", text: JSON.stringify({
+        error: "Required parameters: solver, spec, problem",
+      }) }],
+    };
+  }
+
+  if (solver !== "z3" && solver !== "prolog") {
+    return {
+      content: [{ type: "text", text: JSON.stringify({
+        error: `Unknown solver: ${solver}. Use "z3" or "prolog".`,
+      }) }],
+    };
+  }
+
+  const result = await learner.extractTemplate(solver, spec, problem);
+  if (!result) {
+    return {
+      content: [{ type: "text", text: JSON.stringify({
+        extracted: false,
+        reason: "Template was rejected — either invalid, too similar to an existing template, or LLM produced unparseable output",
+      }) }],
+    };
+  }
+
+  // Check promotions after learning
+  learner.checkPromotions();
+
+  return {
+    content: [{ type: "text", text: JSON.stringify({
+      extracted: true,
+      template: result.name,
+      domain: result.domain,
+      solver: result.solver,
+      signature: result.signature,
+      slots: result.slots.length,
+      promoted: false,
+    }, null, 2) }],
+  };
+}
+
 export async function createChiasmusServer(
   chiasmusHome?: string,
   llmOverride?: LLMAdapter | null,
@@ -347,6 +441,7 @@ export async function createChiasmusServer(
   // Use override if provided, otherwise try env
   const llm = llmOverride !== undefined ? llmOverride : createLLMFromEnv();
   const formalizer = llm ? new FormalizationEngine(library, llm) : null;
+  const learner = llm ? new SkillLearner(library, llm) : null;
 
   const server = new Server(
     { name: "chiasmus", version: "0.1.0" },
@@ -374,6 +469,8 @@ export async function createChiasmusServer(
         return handleFormalize(formalizeEngine, args ?? {});
       case "chiasmus_solve":
         return handleSolve(formalizer, library, args ?? {});
+      case "chiasmus_learn":
+        return handleLearn(learner, args ?? {});
       default:
         return {
           content: [

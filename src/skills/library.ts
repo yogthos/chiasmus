@@ -135,9 +135,53 @@ export class SkillLibrary {
     return this.loadMetadata(name);
   }
 
+  /** Add a learned (candidate) template to the library */
+  addLearned(template: SkillTemplate): void {
+    this.templates.set(template.name, template);
+
+    this.db
+      .prepare(
+        `INSERT INTO skill_metadata (name, promoted)
+         VALUES (?, 0)
+         ON CONFLICT(name) DO NOTHING`
+      )
+      .run(template.name);
+
+    this.rebuildSearchIndex();
+  }
+
+  /** Promote a candidate template to full status */
+  promote(name: string): void {
+    this.db
+      .prepare("UPDATE skill_metadata SET promoted = 1 WHERE name = ?")
+      .run(name);
+  }
+
+  /** Remove a template from the library */
+  remove(name: string): void {
+    this.templates.delete(name);
+    this.db.prepare("DELETE FROM skill_metadata WHERE name = ?").run(name);
+    this.rebuildSearchIndex();
+  }
+
   /** Close the database connection */
   close(): void {
     this.db.close();
+  }
+
+  private rebuildSearchIndex(): void {
+    this.templateOrder = [...this.templates.keys()];
+    const searchTexts = this.templateOrder.map((name) => {
+      const t = this.templates.get(name)!;
+      return [
+        t.name,
+        t.domain,
+        t.signature,
+        ...t.slots.map((s) => s.description),
+        ...t.normalizations.map((n) => `${n.source} ${n.transform}`),
+      ].join(" ");
+    });
+    this.searchIndex = buildIndex(searchTexts);
   }
 
   private loadMetadata(name: string): SkillMetadata {
