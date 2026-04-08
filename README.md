@@ -113,6 +113,19 @@ Analyses: `summary`, `callers`, `callees`, `reachability`, `dead-code`, `cycles`
 
 **`chiasmus_solve`** — End-to-end: selects template, fills slots via LLM, runs lint and correction loops with enriched feedback (unsat cores, structured error classification), returns a verified result. Optional — the same result is achieved by using `chiasmus_formalize` → fill slots → `chiasmus_verify`, which is the recommended workflow since the calling LLM has full conversation context.
 
+**`chiasmus_craft`** — Create a new template and add it to the skill library. The calling LLM designs the template — no API key needed. Describe a problem type, then submit a skeleton with `{{SLOT:name}}` markers, slot definitions, and normalization recipes. Validates slot/skeleton consistency and name uniqueness. Optionally tests the example through the solver.
+
+```
+chiasmus_craft name="api-rate-limit" domain="configuration" solver="z3"
+  signature="Check if rate limit configs across services are consistent"
+  skeleton="{{SLOT:declarations}}\n(assert (not (= {{SLOT:limit_a}} {{SLOT:limit_b}})))"
+  slots=[{name: "declarations", ...}, {name: "limit_a", ...}, {name: "limit_b", ...}]
+  normalizations=[{source: "YAML config", transform: "Map rate limits to Int constants"}]
+→ { created: true, template: "api-rate-limit", slots: 3 }
+```
+
+After creation, the template appears in `chiasmus_skills` searches and `chiasmus_formalize`.
+
 **`chiasmus_learn`** — Extract a reusable template from a verified solution. Candidates get promoted after 3+ successful reuses.
 
 **`chiasmus_lint`** — Fast structural validation of specs without running the solver.
