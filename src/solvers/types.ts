@@ -4,7 +4,7 @@ export type SolverType = "z3" | "prolog";
 /** Result of a solver execution */
 export type SolverResult =
   | { status: "sat"; model: Record<string, string> }
-  | { status: "unsat" }
+  | { status: "unsat"; unsatCore?: string[] }
   | { status: "unknown" }
   | { status: "success"; answers: PrologAnswer[] }
   | { status: "error"; error: string };

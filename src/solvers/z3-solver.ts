@@ -18,7 +18,9 @@ function sanitizeSmtlib(input: string): string {
   return input
     .replace(/\(\s*check-sat\s*\)/g, "")
     .replace(/\(\s*get-model\s*\)/g, "")
+    .replace(/\(\s*get-unsat-core\s*\)/g, "")
     .replace(/\(\s*exit\s*\)/g, "")
+    .replace(/\(\s*set-option\s+:produce-unsat-cores\s+\w+\s*\)/g, "")
     .trim();
 }
 
@@ -43,7 +45,7 @@ export async function createZ3Solver(): Promise<Solver> {
 
       const solver = new ctx.Solver();
       try {
-        solver.fromString(smtlib);
+        solver.fromString(`(set-option :produce-unsat-cores true)\n${smtlib}`);
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : String(e);
         return { status: "error", error: msg };
@@ -64,7 +66,16 @@ export async function createZ3Solver(): Promise<Solver> {
       }
 
       if (checkResult === "unsat") {
-        return { status: "unsat" };
+        try {
+          const coreVector = solver.unsatCore();
+          const unsatCore: string[] = [];
+          for (let i = 0; i < coreVector.length(); i++) {
+            unsatCore.push(coreVector.get(i).sexpr());
+          }
+          return { status: "unsat", unsatCore };
+        } catch {
+          return { status: "unsat", unsatCore: [] };
+        }
       }
 
       if (checkResult !== "sat") {
