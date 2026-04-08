@@ -5,6 +5,7 @@ import type { SolverInput, SolverResult, PrologAnswer } from "../solvers/types.j
 import { correctionLoop } from "../solvers/correction-loop.js";
 import type { CorrectionAttempt } from "../solvers/correction-loop.js";
 import { lintSpec } from "./validate.js";
+import { classifyFeedback } from "./feedback.js";
 
 /** Result of formalize() — template + instructions for the calling LLM */
 export interface FormalizeResult {
@@ -35,7 +36,10 @@ Precise syntax — spec goes directly to solver.`;
 
 const FIX_SYSTEM = `Fix failed formal spec. Return ONLY corrected spec. No explanation, no fences.
 
-Common fixes: type mismatches → matching types | missing declarations → declare before use | unbalanced parens | Prolog missing periods.`;
+Common fixes by feedback type:
+- Solver error: type mismatches → matching types | missing declarations → declare before use | unbalanced parens | Prolog missing periods
+- UNSAT with core: conflicting assertions identified → remove or weaken one of the conflicting constraints
+- No Prolog solutions: missing facts/rules → add covering clauses | wrong query pattern → fix unification`;
 
 export class FormalizationEngine {
   constructor(
@@ -76,8 +80,9 @@ export class FormalizationEngine {
     // Run correction loop with LLM as fixer
     const correctionResult = await correctionLoop(
       initialInput,
-      async (attempt, error) => {
-        const fixed = await this.llmFix(attempt, error, template);
+      async (attempt, error, _round, result) => {
+        const feedback = result ? classifyFeedback(result) : error;
+        const fixed = await this.llmFix(attempt, feedback, template);
         // Lint the fix before resubmitting to the solver
         const linted = await this.lintLoop(fixed, template, 2);
         return this.buildSolverInput(template, linted);
@@ -152,7 +157,7 @@ Output ONLY filled spec.`;
 
   private async llmFix(
     attempt: SolverInput,
-    error: string,
+    feedback: string,
     template: SkillTemplate,
   ): Promise<string> {
     const spec = attempt.type === "z3" ? attempt.smtlib : attempt.program;
@@ -164,8 +169,8 @@ Output ONLY filled spec.`;
 SPECIFICATION:
 ${spec}
 
-ERROR:
-${error}
+FEEDBACK:
+${feedback}
 
 Fix the specification and return only the corrected version.`,
       },
