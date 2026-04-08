@@ -89,6 +89,20 @@ chiasmus_verify solver="prolog"
 → { status: "success", answers: [...], trace: ["ancestor(tom,bob)", "ancestor(bob,ann)", "ancestor(tom,ann)"] }
 ```
 
+**`chiasmus_verify`** also accepts `format="mermaid"` with `solver="prolog"` to parse Mermaid flowcharts and state diagrams directly into Prolog facts:
+
+```
+chiasmus_verify solver="prolog" format="mermaid"
+  input="graph TD\n  UserInput --> Validator\n  Validator --> DB\n  Validator --> Logger"
+  query="reaches(userinput, db)."
+→ { status: "success", answers: [{}] }
+
+chiasmus_verify solver="prolog" format="mermaid"
+  input="stateDiagram-v2\n  Idle --> Active : start\n  Active --> Done : finish"
+  query="can_reach(idle, done)."
+→ { status: "success", answers: [{}] }
+```
+
 **`chiasmus_graph`** — Analyze source code call graphs via tree-sitter + Prolog. Parses TS/JS files, extracts cross-module call graphs, runs formal analyses.
 
 ```
