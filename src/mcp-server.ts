@@ -17,6 +17,8 @@ import { lintSpec } from "./formalize/validate.js";
 import { createLLMFromEnv } from "./llm/anthropic.js";
 import type { LLMAdapter } from "./llm/types.js";
 import type { SolverResult } from "./solvers/types.js";
+import { runAnalysis } from "./graph/analyses.js";
+import type { AnalysisType } from "./graph/analyses.js";
 
 export function getChiasmusHome(): string {
   return process.env.CHIASMUS_HOME ?? join(homedir(), ".chiasmus");
@@ -197,6 +199,57 @@ Returns cleaned spec + fixes applied + remaining errors.`,
         },
       },
       required: ["solver", "input"],
+    },
+  },
+  {
+    name: "chiasmus_graph",
+    description: `Analyze source code call graphs via tree-sitter + Prolog.
+
+Parse source files → extract call graph → run formal analysis.
+Supports: TypeScript, JavaScript. Files must be absolute paths.
+
+ANALYSES:
+  summary      — overview: files, functions, call edges
+  callers      — who calls target? (needs target)
+  callees      — what does target call? (needs target)
+  reachability — can from reach to? (needs from, to)
+  dead-code    — functions unreachable from entry points
+  cycles       — circular call dependencies
+  path         — call chain from→to (needs from, to)
+  impact       — what breaks if target changes? (needs target)
+  facts        — raw Prolog facts for custom queries via chiasmus_verify`,
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        files: {
+          type: "array",
+          items: { type: "string" },
+          description: "Absolute file paths to analyze",
+        },
+        analysis: {
+          type: "string",
+          enum: ["summary", "callers", "callees", "reachability", "dead-code", "cycles", "path", "impact", "facts"],
+          description: "Which analysis to run",
+        },
+        target: {
+          type: "string",
+          description: "Target function name (for callers, callees, impact)",
+        },
+        from: {
+          type: "string",
+          description: "Source function (for reachability, path)",
+        },
+        to: {
+          type: "string",
+          description: "Destination function (for reachability, path)",
+        },
+        entry_points: {
+          type: "array",
+          items: { type: "string" },
+          description: "Entry point function names for dead-code analysis (auto-detects exports if omitted)",
+        },
+      },
+      required: ["files", "analysis"],
     },
   },
 ];
@@ -497,6 +550,47 @@ function handleLint(args: Record<string, unknown>): CallToolResult {
   };
 }
 
+const VALID_ANALYSES = ["summary", "callers", "callees", "reachability", "dead-code", "cycles", "path", "impact", "facts"];
+
+async function handleGraph(args: Record<string, unknown>): Promise<CallToolResult> {
+  const files = args.files;
+  const analysis = args.analysis;
+
+  if (!Array.isArray(files) || typeof analysis !== "string") {
+    return {
+      content: [{ type: "text", text: JSON.stringify({
+        error: "Required: files (string[]), analysis (string)",
+      }) }],
+    };
+  }
+
+  if (!VALID_ANALYSES.includes(analysis)) {
+    return {
+      content: [{ type: "text", text: JSON.stringify({
+        error: `Unknown analysis: ${analysis}. Use one of: ${VALID_ANALYSES.join(", ")}`,
+      }) }],
+    };
+  }
+
+  try {
+    const result = await runAnalysis(files as string[], {
+      analysis: analysis as AnalysisType,
+      target: args.target as string | undefined,
+      from: args.from as string | undefined,
+      to: args.to as string | undefined,
+      entryPoints: args.entry_points as string[] | undefined,
+    });
+    return {
+      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+    };
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return {
+      content: [{ type: "text", text: JSON.stringify({ error: msg }) }],
+    };
+  }
+}
+
 export async function createChiasmusServer(
   chiasmusHome?: string,
   llmOverride?: LLMAdapter | null,
@@ -539,6 +633,8 @@ export async function createChiasmusServer(
         return handleLearn(learner, args ?? {});
       case "chiasmus_lint":
         return handleLint(args ?? {});
+      case "chiasmus_graph":
+        return handleGraph(args ?? {});
       default:
         return {
           content: [
