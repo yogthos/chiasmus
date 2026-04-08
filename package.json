@@ -1,6 +1,6 @@
 {
   "name": "chiasmus",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "description": "Neurosymbolic verification engine - MCP server for formal reasoning with Z3 and Tau Prolog",
   "main": "dist/mcp-server.js",

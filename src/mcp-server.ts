@@ -488,11 +488,16 @@ export async function createChiasmusServer(
   return { server, library, formalizer };
 }
 
-// CLI entry point
-const isMain =
-  process.argv[1] &&
-  (process.argv[1].endsWith("mcp-server.ts") ||
-    process.argv[1].endsWith("mcp-server.js"));
+// CLI entry point — detect if run directly, via npx bin symlink, or via tsx
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
+const thisFile = fileURLToPath(import.meta.url);
+const resolvedArg = process.argv[1] ? realpathSync(process.argv[1]) : "";
+const isMain = resolvedArg === thisFile
+  || resolvedArg === thisFile.replace(/\.ts$/, ".js")
+  || process.argv[1]?.endsWith("mcp-server.ts")
+  || process.argv[1]?.endsWith("mcp-server.js");
 
 if (isMain) {
   const { server } = await createChiasmusServer();
