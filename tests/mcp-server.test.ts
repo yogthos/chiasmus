@@ -242,6 +242,23 @@ describe("Chiasmus MCP Server", () => {
       }
     });
 
+    it("includes related templates in by-name lookup", async () => {
+      const result = await client.callTool({
+        name: "chiasmus_skills",
+        arguments: {
+          name: "policy-contradiction",
+        },
+      });
+
+      const content = result.content as Array<{ type: string; text: string }>;
+      const parsed = JSON.parse(content[0].text);
+      expect(parsed.related).toBeDefined();
+      expect(Array.isArray(parsed.related)).toBe(true);
+      expect(parsed.related.length).toBeGreaterThan(0);
+      expect(parsed.related[0]).toHaveProperty("name");
+      expect(parsed.related[0]).toHaveProperty("reason");
+    });
+
     it("returns error for unknown template name", async () => {
       const result = await client.callTool({
         name: "chiasmus_skills",
@@ -276,6 +293,23 @@ describe("Chiasmus MCP Server", () => {
       expect(parsed.template).toBe("policy-contradiction");
       expect(parsed.solver).toBe("z3");
       expect(parsed.instructions).toContain("SLOT");
+    });
+
+    it("includes suggestions for related templates", async () => {
+      const result = await client.callTool({
+        name: "chiasmus_formalize",
+        arguments: {
+          problem: "Check if access control rules can ever conflict",
+        },
+      });
+
+      const content = result.content as Array<{ type: string; text: string }>;
+      const parsed = JSON.parse(content[0].text);
+      expect(parsed.suggestions).toBeDefined();
+      expect(Array.isArray(parsed.suggestions)).toBe(true);
+      expect(parsed.suggestions.length).toBeGreaterThan(0);
+      expect(parsed.suggestions[0]).toHaveProperty("name");
+      expect(parsed.suggestions[0]).toHaveProperty("reason");
     });
 
     it("returns error when problem is missing", async () => {
