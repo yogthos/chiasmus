@@ -70,6 +70,9 @@
     "@modelcontextprotocol/sdk": "^1.0.0",
     "better-sqlite3": "^12.8.0",
     "tau-prolog": "^0.3.4",
+    "tree-sitter": "^0.21.1",
+    "tree-sitter-javascript": "^0.23.1",
+    "tree-sitter-typescript": "^0.23.2",
     "z3-solver": "^4.16.0"
   },
   "devDependencies": {
