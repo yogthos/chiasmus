@@ -23,7 +23,7 @@ describe("escapeAtom", () => {
 
 describe("graphToProlog", () => {
   it("generates syntactically valid Prolog accepted by solver", async () => {
-    const graph = extractGraph([{
+    const graph = await extractGraph([{
       path: "test.ts",
       content: `
         function a() { b(); }

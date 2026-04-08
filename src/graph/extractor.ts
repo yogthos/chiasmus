@@ -1,8 +1,8 @@
-import { parseSource, getLanguageForFile } from "./parser.js";
+import { parseSource, parseSourceAsync, getLanguageForFile } from "./parser.js";
 import type { CodeGraph, DefinesFact, CallsFact, ImportsFact, ExportsFact, ContainsFact } from "./types.js";
 
 /** Extract a unified call graph from multiple source files */
-export function extractGraph(files: Array<{ path: string; content: string }>): CodeGraph {
+export async function extractGraph(files: Array<{ path: string; content: string }>): Promise<CodeGraph> {
   const defines: DefinesFact[] = [];
   const calls: CallsFact[] = [];
   const imports: ImportsFact[] = [];
@@ -15,12 +15,17 @@ export function extractGraph(files: Array<{ path: string; content: string }>): C
     const lang = getLanguageForFile(file.path);
     if (!lang) continue;
 
-    const tree = parseSource(file.content, file.path);
+    // Try sync first (CJS grammars), fall back to async (ESM grammars)
+    const tree = parseSource(file.content, file.path)
+      ?? await parseSourceAsync(file.content, file.path);
     if (!tree) continue;
 
-    const scopeStack: string[] = []; // enclosing function/method names
-
-    walkNode(tree.rootNode, file.path, lang, scopeStack, defines, calls, imports, exports, contains, callSet);
+    if (lang === "clojure") {
+      walkClojure(tree.rootNode, file.path, defines, calls, imports, exports, callSet);
+    } else {
+      const scopeStack: string[] = [];
+      walkNode(tree.rootNode, file.path, lang, scopeStack, defines, calls, imports, exports, contains, callSet);
+    }
   }
 
   return { defines, calls, imports, exports, contains };
@@ -295,4 +300,192 @@ function extractStringContent(node: any): string | null {
     return text.slice(1, -1);
   }
   return text;
+}
+
+// ── Clojure extraction ──────────────────────────────────────────────
+
+/** Get the text of the first sym_name child (direct or nested in sym_lit) */
+function cljSymName(node: any): string | null {
+  if (node.type === "sym_name") return node.text;
+  if (node.type === "sym_lit") {
+    for (let i = 0; i < node.childCount; i++) {
+      if (node.child(i).type === "sym_name") return node.child(i).text;
+    }
+  }
+  return null;
+}
+
+/** Check if a list_lit is a (defn ...) or (defn- ...) form */
+function cljDefnName(listNode: any): { name: string; private: boolean } | null {
+  // First child after ( should be sym_lit with sym_name "defn" or "defn-"
+  let symIdx = -1;
+  for (let i = 0; i < listNode.childCount; i++) {
+    const child = listNode.child(i);
+    if (child.type === "sym_lit") {
+      symIdx = i;
+      break;
+    }
+  }
+  if (symIdx < 0) return null;
+
+  const head = cljSymName(listNode.child(symIdx));
+  if (head !== "defn" && head !== "defn-") return null;
+
+  // Next sym_lit is the function name
+  for (let i = symIdx + 1; i < listNode.childCount; i++) {
+    const child = listNode.child(i);
+    if (child.type === "sym_lit") {
+      const name = cljSymName(child);
+      if (name) return { name, private: head === "defn-" };
+    }
+  }
+  return null;
+}
+
+/** Extract ns form: (ns foo.bar (:require [baz.qux :as q] [x.y :refer [z]])) */
+function cljExtractNs(
+  listNode: any,
+  filePath: string,
+  imports: ImportsFact[],
+  exports: ExportsFact[],
+): string | null {
+  let symIdx = -1;
+  for (let i = 0; i < listNode.childCount; i++) {
+    if (listNode.child(i).type === "sym_lit") { symIdx = i; break; }
+  }
+  if (symIdx < 0) return null;
+
+  const head = cljSymName(listNode.child(symIdx));
+  if (head !== "ns") return null;
+
+  // Namespace name is next sym_lit
+  let nsName: string | null = null;
+  for (let i = symIdx + 1; i < listNode.childCount; i++) {
+    const child = listNode.child(i);
+    if (child.type === "sym_lit") {
+      nsName = cljSymName(child);
+      break;
+    }
+  }
+
+  // Find (:require ...) forms
+  for (let i = 0; i < listNode.childCount; i++) {
+    const child = listNode.child(i);
+    if (child.type !== "list_lit") continue;
+
+    // Check if first element is :require keyword
+    for (let j = 0; j < child.childCount; j++) {
+      const kwd = child.child(j);
+      if (kwd.type === "kwd_lit") {
+        const kwdName = kwd.children?.find((c: any) => c.type === "kwd_name")?.text;
+        if (kwdName === "require") {
+          // Extract required namespaces from vec_lit children
+          for (let k = j + 1; k < child.childCount; k++) {
+            const vec = child.child(k);
+            if (vec.type === "vec_lit") {
+              // First sym_lit in vector is the required namespace
+              for (let l = 0; l < vec.childCount; l++) {
+                if (vec.child(l).type === "sym_lit") {
+                  const reqNs = cljSymName(vec.child(l));
+                  if (reqNs) {
+                    imports.push({ file: filePath, name: reqNs, source: reqNs });
+                  }
+                  break;
+                }
+              }
+            }
+          }
+        }
+        break;
+      }
+    }
+  }
+
+  return nsName;
+}
+
+/** Walk a Clojure AST and extract defines, calls, imports */
+function walkClojure(
+  rootNode: any,
+  filePath: string,
+  defines: DefinesFact[],
+  calls: CallsFact[],
+  imports: ImportsFact[],
+  exports: ExportsFact[],
+  callSet: Set<string>,
+): void {
+  const defnNames = new Set<string>(); // track defined function names
+
+  // First pass: collect top-level forms
+  for (let i = 0; i < rootNode.childCount; i++) {
+    const child = rootNode.child(i);
+    if (child.type !== "list_lit") continue;
+
+    // Check for ns form
+    const nsName = cljExtractNs(child, filePath, imports, exports);
+    if (nsName) continue;
+
+    // Check for defn/defn-
+    const defn = cljDefnName(child);
+    if (defn) {
+      defines.push({
+        file: filePath,
+        name: defn.name,
+        kind: "function",
+        line: child.startPosition.row + 1,
+      });
+      defnNames.add(defn.name);
+      if (!defn.private) {
+        exports.push({ file: filePath, name: defn.name });
+      }
+    }
+  }
+
+  // Second pass: extract calls within each defn body
+  for (let i = 0; i < rootNode.childCount; i++) {
+    const child = rootNode.child(i);
+    if (child.type !== "list_lit") continue;
+
+    const defn = cljDefnName(child);
+    if (!defn) continue;
+
+    // Walk the body looking for call sites (list_lit starting with sym_lit)
+    cljExtractCalls(child, defn.name, calls, callSet, defnNames);
+  }
+}
+
+/** Recursively extract function calls from a Clojure form */
+function cljExtractCalls(
+  node: any,
+  enclosingFn: string,
+  calls: CallsFact[],
+  callSet: Set<string>,
+  skipSelf: Set<string> | null,
+): void {
+  for (let i = 0; i < node.childCount; i++) {
+    const child = node.child(i);
+    if (child.type === "list_lit") {
+      // First sym_lit child is the function being called
+      for (let j = 0; j < child.childCount; j++) {
+        const maybeCall = child.child(j);
+        if (maybeCall.type === "sym_lit") {
+          let callee = cljSymName(maybeCall);
+          if (callee && callee !== enclosingFn) {
+            // Strip namespace qualifier: db/query → query
+            if (callee.includes("/")) {
+              callee = callee.split("/").pop()!;
+            }
+            const key = `${enclosingFn}->${callee}`;
+            if (!callSet.has(key)) {
+              callSet.add(key);
+              calls.push({ caller: enclosingFn, callee });
+            }
+          }
+          break;
+        }
+      }
+      // Recurse into nested forms
+      cljExtractCalls(child, enclosingFn, calls, callSet, skipSelf);
+    }
+  }
 }
