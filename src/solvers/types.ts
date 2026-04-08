@@ -6,7 +6,7 @@ export type SolverResult =
   | { status: "sat"; model: Record<string, string> }
   | { status: "unsat"; unsatCore?: string[] }
   | { status: "unknown" }
-  | { status: "success"; answers: PrologAnswer[] }
+  | { status: "success"; answers: PrologAnswer[]; trace?: string[] }
   | { status: "error"; error: string };
 
 /** A single Prolog query answer: variable bindings */
@@ -33,4 +33,4 @@ export interface Solver {
 /** Input to a solver */
 export type SolverInput =
   | { type: "z3"; smtlib: string }
-  | { type: "prolog"; program: string; query: string };
+  | { type: "prolog"; program: string; query: string; explain?: boolean };

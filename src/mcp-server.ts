@@ -74,6 +74,11 @@ Z3 EXAMPLE (RBAC conflict):
           description:
             "Batch mode: array of Prolog query goals. Runs all against same program. Returns array of results.",
         },
+        explain: {
+          type: "boolean",
+          description:
+            "Prolog only: return derivation trace showing which rules fired (default: false)",
+        },
       },
       required: ["solver", "input"],
     },
@@ -200,6 +205,7 @@ async function handleVerify(args: Record<string, unknown>): Promise<CallToolResu
   const solver = args.solver;
   const input = args.input;
   const query = args.query as string | undefined;
+  const explain = args.explain as boolean | undefined;
 
   if (typeof solver !== "string" || typeof input !== "string") {
     return {
@@ -238,7 +244,7 @@ async function handleVerify(args: Record<string, unknown>): Promise<CallToolResu
         try {
           const results: SolverResult[] = [];
           for (const q of queries) {
-            results.push(await session.solve({ type: "prolog", program: input, query: q as string }));
+            results.push(await session.solve({ type: "prolog", program: input, query: q as string, explain: explain ?? false }));
           }
           return {
             content: [{ type: "text", text: JSON.stringify(results, null, 2) }],
@@ -260,6 +266,7 @@ async function handleVerify(args: Record<string, unknown>): Promise<CallToolResu
             type: "prolog",
             program: input,
             query,
+            explain: explain ?? false,
           });
         } finally {
           session.dispose();

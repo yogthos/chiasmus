@@ -161,6 +161,30 @@ describe("Chiasmus MCP Server", () => {
       expect(parsed.unsatCore.length).toBeGreaterThan(0);
     });
 
+    it("returns trace when explain=true for Prolog", async () => {
+      const result = await client.callTool({
+        name: "chiasmus_verify",
+        arguments: {
+          solver: "prolog",
+          input: `
+            parent(tom, bob).
+            parent(bob, ann).
+            ancestor(X, Y) :- parent(X, Y).
+            ancestor(X, Y) :- parent(X, Z), ancestor(Z, Y).
+          `,
+          query: "ancestor(tom, Who).",
+          explain: true,
+        },
+      });
+
+      const content = result.content as Array<{ type: string; text: string }>;
+      const parsed = JSON.parse(content[0].text);
+      expect(parsed.status).toBe("success");
+      expect(parsed.trace).toBeDefined();
+      expect(Array.isArray(parsed.trace)).toBe(true);
+      expect(parsed.trace.length).toBeGreaterThan(0);
+    });
+
     it("requires query parameter for prolog solver", async () => {
       const result = await client.callTool({
         name: "chiasmus_verify",
