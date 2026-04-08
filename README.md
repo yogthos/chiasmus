@@ -1,6 +1,6 @@
 # Chiasmus
 
-MCP server that gives LLMs access to formal verification via Z3 (SMT solver) and Tau Prolog. Translates natural language problems into formal logic using a template-based pipeline, verifies results with mathematical certainty.
+MCP server that gives LLMs access to formal verification via Z3 (SMT solver) and Tau Prolog, plus tree-sitter-based source code analysis. Translates natural language problems into formal logic using a template-based pipeline, verifies results with mathematical certainty, and analyzes call graphs for reachability, dead code, and impact analysis.
 
 ### Example use cases
 
@@ -9,6 +9,8 @@ MCP server that gives LLMs access to formal verification via Z3 (SMT solver) and
 - **"Can user input reach the database?"** → Prolog traces all paths through the call graph, flags taint flows to sensitive sinks
 - **"Are our frontend and backend validations consistent?"** → Z3 finds concrete inputs that pass one but fail the other (e.g. age=15 passes frontend min=13 but fails backend min=18)
 - **"Does our workflow have dead-end or unreachable states?"** → Prolog checks reachability from the initial state, identifies orphaned and terminal nodes
+- **"What's the dead code in this module?"** → tree-sitter parses source files, Prolog finds functions unreachable from any entry point
+- **"What breaks if I change this function?"** → call graph impact analysis shows all transitive callers
 
 ## Setup
 
@@ -68,33 +70,52 @@ Add to `opencode.json`:
 
 ## Tools
 
-**`chiasmus_verify`** — Submit raw SMT-LIB or Prolog, get a verified result.
+**`chiasmus_verify`** — Submit raw SMT-LIB or Prolog, get a verified result. Z3 UNSAT results include an `unsatCore` showing which assertions conflict. Prolog supports `explain=true` for derivation traces showing which rules fired.
 
 ```
 chiasmus_verify solver="z3" input="
   (declare-const x Int)
-  (declare-const y Int)
-  (assert (= (+ x y) 10))
-  (assert (> x 0))
-  (assert (> y 0))
+  (assert (! (> x 10) :named gt10))
+  (assert (! (< x 5) :named lt5))
 "
-→ { status: "sat", model: { x: "7", y: "3" } }
+→ { status: "unsat", unsatCore: ["gt10", "lt5"] }
 ```
 
 ```
 chiasmus_verify solver="prolog"
   input="parent(tom, bob). parent(bob, ann). ancestor(X,Y) :- parent(X,Y). ancestor(X,Y) :- parent(X,Z), ancestor(Z,Y)."
   query="ancestor(tom, Who)."
-→ { status: "success", answers: [{ bindings: { Who: "bob" } }, { bindings: { Who: "ann" } }] }
+  explain=true
+→ { status: "success", answers: [...], trace: ["ancestor(tom,bob)", "ancestor(bob,ann)", "ancestor(tom,ann)"] }
 ```
 
-**`chiasmus_skills`** — Search the template library. Ships with 8 starter templates covering authorization, configuration, dependency resolution, validation, rule inference, and graph reachability.
+**`chiasmus_graph`** — Analyze source code call graphs via tree-sitter + Prolog. Parses TS/JS files, extracts cross-module call graphs, runs formal analyses.
 
-**`chiasmus_formalize`** — Find the best template for a problem, get slot-filling instructions. Fill the slots using your context, then call `chiasmus_verify`.
+```
+chiasmus_graph files=["src/server.ts", "src/db.ts"] analysis="callers" target="query"
+→ { analysis: "callers", result: ["handleRequest"] }
 
-**`chiasmus_solve`** — End-to-end: selects template, fills slots via LLM, runs lint and correction loops, returns a verified result. Optional — the same result is achieved by using `chiasmus_formalize` → fill slots → `chiasmus_verify`, which is the recommended workflow since the calling LLM has full conversation context.
+chiasmus_graph files=["src/**/*.ts"] analysis="dead-code"
+→ { analysis: "dead-code", result: ["unusedHelper", "legacyParser"] }
+
+chiasmus_graph files=["src/**/*.ts"] analysis="reachability" from="handleRequest" to="dbQuery"
+→ { analysis: "reachability", result: { reachable: true } }
+
+chiasmus_graph files=["src/**/*.ts"] analysis="impact" target="validate"
+→ { analysis: "impact", result: ["handleRequest", "main"] }
+```
+
+Analyses: `summary`, `callers`, `callees`, `reachability`, `dead-code`, `cycles`, `path`, `impact`, `facts`.
+
+**`chiasmus_skills`** — Search the template library. Ships with 8 starter templates covering authorization, configuration, dependency resolution, validation, rule inference, and graph reachability. By-name lookups include related template suggestions.
+
+**`chiasmus_formalize`** — Find the best template for a problem, get slot-filling instructions plus suggestions for related verification checks. Fill the slots using your context, then call `chiasmus_verify`.
+
+**`chiasmus_solve`** — End-to-end: selects template, fills slots via LLM, runs lint and correction loops with enriched feedback (unsat cores, structured error classification), returns a verified result. Optional — the same result is achieved by using `chiasmus_formalize` → fill slots → `chiasmus_verify`, which is the recommended workflow since the calling LLM has full conversation context.
 
 **`chiasmus_learn`** — Extract a reusable template from a verified solution. Candidates get promoted after 3+ successful reuses.
+
+**`chiasmus_lint`** — Fast structural validation of specs without running the solver.
 
 ## Recommended Workflow
 
@@ -113,6 +134,14 @@ Use a solver when the LLM alone can't guarantee correctness:
 - **"Do these rules ever conflict?"** — contradiction detection over combinatorial spaces
 - **"Can X reach Y through any path?"** — transitive closure / reachability
 - **Access control, configs, dependencies** — where correctness is non-negotiable
+
+Use `chiasmus_graph` when you need structural reasoning about code:
+
+- **"What calls this function?"** — impact analysis before refactoring
+- **"What's dead code?"** — find functions unreachable from entry points
+- **"Can user input reach this SQL query?"** — taint analysis via call graph reachability
+- **"What breaks if I change X?"** — blast radius via reverse reachability
+- **"Are there circular dependencies?"** — cycle detection in call graphs
 
 ## Configuration
 
