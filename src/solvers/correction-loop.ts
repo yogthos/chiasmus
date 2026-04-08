@@ -8,6 +8,7 @@ export type SpecFixer = (
   attempt: SolverInput,
   error: string,
   round: number,
+  result?: SolverResult,
 ) => Promise<SolverInput | null>;
 
 /** Record of a single correction attempt */
@@ -76,7 +77,7 @@ export async function correctionLoop(
     }
 
     // Ask fixer to patch the spec
-    const patched = await fixer(currentInput, result.error, round);
+    const patched = await fixer(currentInput, result.error, round, result);
     if (patched === null) {
       // Fixer gave up
       return { result, converged: false, rounds: round, history };

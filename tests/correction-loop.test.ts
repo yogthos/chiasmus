@@ -169,6 +169,28 @@ describe("Correction Loop", () => {
     });
   });
 
+  describe("enhanced feedback", () => {
+    it("passes full SolverResult to fixer via result parameter", async () => {
+      let capturedResult: unknown = null;
+      const fixer: SpecFixer = async (attempt, error, round, result) => {
+        capturedResult = result;
+        return null; // give up after capturing
+      };
+
+      await correctionLoop(
+        {
+          type: "z3",
+          smtlib: `(declare-const x Int) (assert (> x "bad"))`,
+        },
+        fixer,
+      );
+
+      expect(capturedResult).toBeDefined();
+      expect((capturedResult as any).status).toBe("error");
+      expect((capturedResult as any).error).toBeTruthy();
+    });
+  });
+
   describe("Prolog", () => {
     it("passes through a correct Prolog program without correction", async () => {
       const fixer: SpecFixer = async () => {

@@ -149,6 +149,33 @@ reaches(A, B) :- edge(A, Mid), reaches(Mid, B).
       expect(result.result.status).toBe("error");
     });
 
+    it("uses enriched feedback in correction prompts", async () => {
+      const prompts: string[] = [];
+      let calls = 0;
+      llm.onMatch(/./, () => {
+        calls++;
+        // Track what prompts the LLM receives
+        return calls <= 2
+          ? `(declare-const x Int) (assert (> x "broken"))`
+          : `(declare-const x Int) (assert (> x 5))`;
+      });
+
+      // Override complete to capture prompts
+      const origComplete = llm.complete.bind(llm);
+      llm.complete = async (system: string, messages: Array<{ role: string; content: string }>) => {
+        for (const m of messages) {
+          prompts.push(m.content);
+        }
+        return origComplete(system, messages);
+      };
+
+      await engine.solve("Find an integer greater than 5");
+
+      // At least one prompt should contain "FEEDBACK" or error info (not just "ERROR")
+      const fixPrompts = prompts.filter((p) => p.includes("FEEDBACK") || p.includes("Solver error"));
+      expect(fixPrompts.length).toBeGreaterThan(0);
+    });
+
     it("records template use in skill library", async () => {
       llm.onMatch(/./, `
 (declare-const x Int)
