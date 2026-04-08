@@ -34,6 +34,10 @@ export interface SkillTemplate {
   slots: SlotDef[];
   /** Known normalization recipes */
   normalizations: Normalization[];
+  /** Encoding tips and pitfalls specific to this template */
+  tips?: string[];
+  /** A complete worked example showing a filled version of this template */
+  example?: string;
 }
 
 /** Runtime metadata tracked per template */

@@ -36,17 +36,32 @@ WHEN TO USE:
   - Prove/disprove: "is this always true for all inputs?"
   - Derive conclusions: "what follows from these facts and rules?"
 
-NOTE: Do NOT include (check-sat) or (get-model) in Z3 input — the tool runs these automatically.
+IMPORTANT Z3 TIPS:
+  - Do NOT include (check-sat) or (get-model) — added automatically.
+  - Use biconditional (= flag (or ...)) not implication (=> ... flag) for boolean flags.
+    Implications make formulas trivially satisfiable.
+  - Do NOT use (define-fun name ((arg Type)) ...) — breaks model extraction.
+    Use (declare-const name Bool) + (assert (= name expr)) instead.
+
+IMPORTANT PROLOG TIPS:
+  - All clauses must end with a period.
+  - WARNING: Recursive reachability rules loop infinitely on cyclic graphs.
+    Tau Prolog has no tabling. Query edges individually and drive BFS externally.
 
 EXAMPLES:
-  Z3 (check if two integers sum to 10):
+  Z3 (check if RBAC rules conflict):
     solver: "z3"
     input: |
-      (declare-const x Int)
-      (declare-const y Int)
-      (assert (= (+ x y) 10))
-      (assert (> x 0))
-      (assert (> y 0))
+      (declare-datatypes ((Role 0)) (((admin) (editor))))
+      (declare-datatypes ((Action 0)) (((read) (write))))
+      (declare-const r Role)
+      (declare-const a Action)
+      (declare-const allowed Bool)
+      (declare-const denied Bool)
+      (assert (= allowed (or (and (= r admin) (= a read)) (and (= r editor) (= a write)))))
+      (assert (= denied (or (and (= r editor) (= a write)))))
+      (assert allowed)
+      (assert denied)
 
   Prolog (derive permissions):
     solver: "prolog"

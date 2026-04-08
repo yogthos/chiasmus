@@ -13,63 +13,81 @@ export const STARTER_TEMPLATES: SkillTemplate[] = [
 ; Principals, resources, and actions as enumerated types
 {{SLOT:type_declarations}}
 
-; Decision variables
-(declare-const principal {{SLOT:principal_type}})
-(declare-const resource {{SLOT:resource_type}})
-(declare-const action {{SLOT:action_type}})
+(declare-const r {{SLOT:principal_type}})
+(declare-const a {{SLOT:action_type}})
+(declare-const res {{SLOT:resource_type}})
 (declare-const allowed Bool)
 (declare-const denied Bool)
 
-; Policy rules
-{{SLOT:policy_rules}}
+; allowed is true IFF the (r, a, res) triple matches ANY allow rule
+(assert (= allowed (or {{SLOT:allow_rules}})))
 
-; Check: can both allowed and denied be true simultaneously?
+; denied is true IFF the (r, a, res) triple matches ANY deny rule
+(assert (= denied (or {{SLOT:deny_rules}})))
+
+; Check: can both be true simultaneously?
 (assert allowed)
 (assert denied)`,
     slots: [
       {
         name: "type_declarations",
-        description: "SMT-LIB declare-datatypes for principals, resources, actions",
-        format: "(declare-datatypes ((Principal 0)) (((alice) (bob) ...)))",
+        description: "SMT-LIB declare-datatypes for principals, actions, resources",
+        format: "(declare-datatypes ((Role 0)) (((admin) (editor) (viewer))))\n(declare-datatypes ((Action 0)) (((read) (write) (delete))))\n(declare-datatypes ((Resource 0)) (((docs) (settings))))",
+      },
+      { name: "principal_type", description: "Type name for principals", format: "Role" },
+      { name: "action_type", description: "Type name for actions", format: "Action" },
+      { name: "resource_type", description: "Type name for resources", format: "Resource" },
+      {
+        name: "allow_rules",
+        description: "OR of all allow conditions — each is (and (= r X) (= a Y) (= res Z))",
+        format: "(and (= r admin) (= a read) (= res docs))\n  (and (= r editor) (= a write) (= res docs))",
       },
       {
-        name: "principal_type",
-        description: "The type name for principals",
-        format: "Principal",
-      },
-      {
-        name: "resource_type",
-        description: "The type name for resources",
-        format: "Resource",
-      },
-      {
-        name: "action_type",
-        description: "The type name for actions",
-        format: "Action",
-      },
-      {
-        name: "policy_rules",
-        description:
-          "Implications mapping (principal, resource, action) to allowed/denied",
-        format: "(assert (=> (and (= principal alice) (= action read)) allowed))",
+        name: "deny_rules",
+        description: "OR of all deny conditions — each is (and (= r X) (= a Y) (= res Z))",
+        format: "(and (= r editor) (= a delete) (= res docs))",
       },
     ],
     normalizations: [
       {
         source: "AWS IAM JSON",
-        transform:
-          "Map each Statement's Effect/Principal/Action/Resource to allow/deny implications",
+        transform: "Map each Statement's Effect/Principal/Action/Resource to an (and ...) clause",
       },
       {
         source: "Kubernetes RBAC",
-        transform:
-          "Expand rules[].{verbs, resources, apiGroups} into action/resource allow implications",
+        transform: "Expand rules[].{verbs, resources} into (and (= a verb) (= res resource)) clauses",
       },
       {
         source: "natural language",
-        transform: "Extract entities, classify as principal/resource/action, map to implications",
+        transform: "Extract entities, classify as principal/action/resource, build (and ...) clauses",
       },
     ],
+    tips: [
+      "CRITICAL: Use biconditional (=) not implication (=>) for allowed/denied. Implications make the formula trivially satisfiable.",
+      "Do NOT use define-fun with arguments — it breaks model extraction. Use declare-const + (assert (= ...)) instead.",
+      "The model will include r, a, res values showing the exact conflicting request.",
+    ],
+    example: `(declare-datatypes ((Role 0)) (((admin) (editor))))
+(declare-datatypes ((Action 0)) (((read) (write))))
+(declare-datatypes ((Resource 0)) (((docs) (billing))))
+
+(declare-const r Role)
+(declare-const a Action)
+(declare-const res Resource)
+(declare-const allowed Bool)
+(declare-const denied Bool)
+
+(assert (= allowed (or
+  (and (= r admin) (= a read) (= res billing))
+  (and (= r editor) (= a write) (= res docs))
+)))
+
+(assert (= denied (or
+  (and (= r editor) (= a write) (= res docs))
+)))
+
+(assert allowed)
+(assert denied)`,
   },
 
   {
@@ -86,8 +104,8 @@ export const STARTER_TEMPLATES: SkillTemplate[] = [
 (declare-const action {{SLOT:action_type}})
 (declare-const can_access Bool)
 
-; Role assignments and permission rules
-{{SLOT:role_rules}}
+; Define can_access as true IFF role rules grant it
+(assert (= can_access (or {{SLOT:access_rules}})))
 
 ; Target: can this specific principal access this specific resource?
 (assert (= principal {{SLOT:target_principal}}))
@@ -96,16 +114,16 @@ export const STARTER_TEMPLATES: SkillTemplate[] = [
     slots: [
       {
         name: "type_declarations",
-        description: "SMT-LIB declare-datatypes for principals, resources, actions",
+        description: "SMT-LIB declare-datatypes",
         format: "(declare-datatypes ...)",
       },
       { name: "principal_type", description: "Type name for principals", format: "Principal" },
       { name: "resource_type", description: "Type name for resources", format: "Resource" },
       { name: "action_type", description: "Type name for actions", format: "Action" },
       {
-        name: "role_rules",
-        description: "Rules that derive can_access from roles and permissions",
-        format: "(assert (=> (and (= principal alice) ...) can_access))",
+        name: "access_rules",
+        description: "OR of conditions that grant access",
+        format: "(and (= principal alice) (= action read) (= resource docs))",
       },
       { name: "target_principal", description: "The principal to check", format: "alice" },
       { name: "target_resource", description: "The resource to check", format: "secret_doc" },
@@ -113,12 +131,16 @@ export const STARTER_TEMPLATES: SkillTemplate[] = [
     normalizations: [
       {
         source: "Django permissions",
-        transform: "Extract user/group assignments and permission checks into role rules",
+        transform: "Extract user/group assignments and permission checks into access rule clauses",
       },
       {
         source: "natural language",
         transform: "Identify the target principal and resource, extract role hierarchy",
       },
+    ],
+    tips: [
+      "Use biconditional (=) for can_access, not implication (=>).",
+      "SAT means access is possible; UNSAT means the principal can never reach the resource.",
     ],
   },
 
@@ -132,14 +154,16 @@ export const STARTER_TEMPLATES: SkillTemplate[] = [
 ; Input variables representing all possible inputs
 {{SLOT:input_declarations}}
 
-; Output of config A
-{{SLOT:config_a_logic}}
+; Config A output
+(declare-const result_a Bool)
+(assert (= result_a {{SLOT:config_a_expr}}))
 
-; Output of config B
-{{SLOT:config_b_logic}}
+; Config B output
+(declare-const result_b Bool)
+(assert (= result_b {{SLOT:config_b_expr}}))
 
 ; Check: is there any input where the two configs produce different outputs?
-(assert (not (= {{SLOT:output_a}} {{SLOT:output_b}})))`,
+(assert (not (= result_a result_b)))`,
     slots: [
       {
         name: "input_declarations",
@@ -147,29 +171,39 @@ export const STARTER_TEMPLATES: SkillTemplate[] = [
         format: "(declare-const port Int) (declare-const src_ip Int)",
       },
       {
-        name: "config_a_logic",
-        description: "Assertions encoding the first configuration's behavior",
-        format: "(declare-const result_a Bool) (assert (=> (> port 80) result_a))",
+        name: "config_a_expr",
+        description: "Boolean expression for config A's behavior",
+        format: "(and (>= port 80) (<= port 443))",
       },
       {
-        name: "config_b_logic",
-        description: "Assertions encoding the second configuration's behavior",
-        format: "(declare-const result_b Bool) (assert (=> (>= port 80) result_b))",
+        name: "config_b_expr",
+        description: "Boolean expression for config B's behavior",
+        format: "(and (>= port 80) (<= port 8080))",
       },
-      { name: "output_a", description: "Output variable from config A", format: "result_a" },
-      { name: "output_b", description: "Output variable from config B", format: "result_b" },
     ],
     normalizations: [
       {
         source: "firewall rules",
-        transform:
-          "Encode each rule set as boolean logic over port/protocol/address variables",
+        transform: "Encode each rule set as boolean expression over port/protocol/address variables",
       },
       {
         source: "Kubernetes NetworkPolicy",
         transform: "Map ingress/egress rules to boolean expressions over pod labels and ports",
       },
     ],
+    tips: [
+      "Use biconditional (=) to define result variables from expressions.",
+      "SAT means configs differ — the model shows the diverging input. UNSAT means they're equivalent.",
+    ],
+    example: `(declare-const port Int)
+
+(declare-const result_a Bool)
+(assert (= result_a (and (>= port 80) (<= port 443))))
+
+(declare-const result_b Bool)
+(assert (= result_b (and (>= port 80) (<= port 8080))))
+
+(assert (not (= result_a result_b)))`,
   },
 
   {
@@ -198,12 +232,12 @@ export const STARTER_TEMPLATES: SkillTemplate[] = [
       },
       {
         name: "range_constraints",
-        description: "Constrain each package to its available version range",
-        format: "(assert (and (>= pkg_a 1) (<= pkg_a 3)))",
+        description: "Constrain each package to its available versions using (or (= pkg v1) (= pkg v2) ...)",
+        format: "(assert (or (= pkg_a 1) (= pkg_a 2) (= pkg_a 3)))",
       },
       {
         name: "dependency_rules",
-        description: "Conditional version requirements between packages",
+        description: "Conditional version requirements. Use (=>) for 'if pkg_a >= 2 then pkg_b >= 3'",
         format: "(assert (=> (>= pkg_a 2) (>= pkg_b 3)))",
       },
       {
@@ -215,14 +249,23 @@ export const STARTER_TEMPLATES: SkillTemplate[] = [
     normalizations: [
       {
         source: "package.json",
-        transform:
-          "Parse semver ranges into integer constraints, map peer/optional deps to conditional rules",
+        transform: "Parse semver ranges into (or (= pkg v) ...) constraints, map peer deps to (=>) rules",
       },
       {
         source: "requirements.txt",
         transform: "Parse version specifiers (>=, ==, !=) into SMT constraints",
       },
     ],
+    tips: [
+      "For discrete version sets, use (or (= pkg 1) (= pkg 2)) not (and (>= pkg 1) (<= pkg 2)) — the latter allows non-integer values.",
+      "SAT returns a valid assignment. UNSAT means no compatible versions exist.",
+    ],
+    example: `(declare-const app Int)
+(declare-const lib Int)
+(assert (or (= app 1) (= app 2) (= app 3)))
+(assert (or (= lib 1) (= lib 2)))
+(assert (=> (>= app 2) (>= lib 2)))
+(assert (not (and (= app 3) (= lib 1))))`,
   },
 
   {
@@ -235,14 +278,17 @@ export const STARTER_TEMPLATES: SkillTemplate[] = [
 ; Input field variables
 {{SLOT:field_declarations}}
 
-; Validation rule set A
-{{SLOT:rule_set_a}}
+; Value passes rule set A
+(declare-const passes_a Bool)
+(assert (= passes_a (and {{SLOT:rule_set_a_conditions}})))
 
-; Validation rule set B
-{{SLOT:rule_set_b}}
+; Value passes rule set B
+(declare-const passes_b Bool)
+(assert (= passes_b (and {{SLOT:rule_set_b_conditions}})))
 
-; Check: is there an input that passes A but fails B (or vice versa)?
-(assert (and {{SLOT:passes_a}} (not {{SLOT:passes_b}})))`,
+; Check: is there an input that passes A but fails B?
+(assert passes_a)
+(assert (not passes_b))`,
     slots: [
       {
         name: "field_declarations",
@@ -250,29 +296,42 @@ export const STARTER_TEMPLATES: SkillTemplate[] = [
         format: "(declare-const age Int) (declare-const name_len Int)",
       },
       {
-        name: "rule_set_a",
-        description: "Assertions for the first set of validation rules",
-        format: "(declare-const valid_a Bool) (assert (=> (and (>= age 18) ...) valid_a))",
+        name: "rule_set_a_conditions",
+        description: "Conjunction of conditions for rule set A (e.g. frontend validation)",
+        format: "(>= age 13) (<= age 120) (>= name_len 3)",
       },
       {
-        name: "rule_set_b",
-        description: "Assertions for the second set of validation rules",
-        format: "(declare-const valid_b Bool) (assert (=> (and (> age 17) ...) valid_b))",
+        name: "rule_set_b_conditions",
+        description: "Conjunction of conditions for rule set B (e.g. backend validation)",
+        format: "(>= age 18) (<= age 150) (>= name_len 3)",
       },
-      { name: "passes_a", description: "Variable indicating input passes rule set A", format: "valid_a" },
-      { name: "passes_b", description: "Variable indicating input passes rule set B", format: "valid_b" },
     ],
     normalizations: [
       {
         source: "JSON Schema",
-        transform:
-          "Map minimum/maximum/pattern/required to integer/boolean constraints",
+        transform: "Map minimum/maximum/pattern/required to integer/boolean conditions",
       },
       {
         source: "Zod schema",
-        transform: "Extract .min()/.max()/.refine() chains into SMT assertions",
+        transform: "Extract .min()/.max()/.refine() chains into conditions",
       },
     ],
+    tips: [
+      "Use biconditional (=) to define passes_a/passes_b from conditions.",
+      "SAT means a gap exists — the model shows a concrete input that passes A but fails B.",
+      "Run twice (swap A and B) to check gaps in both directions.",
+      "For per-field gaps, run a separate check per field rather than one big formula.",
+    ],
+    example: `(declare-const age Int)
+
+(declare-const passes_frontend Bool)
+(assert (= passes_frontend (and (>= age 13) (<= age 120))))
+
+(declare-const passes_backend Bool)
+(assert (= passes_backend (and (>= age 18) (<= age 150))))
+
+(assert passes_frontend)
+(assert (not passes_backend))`,
   },
 
   // ─── Prolog Templates ────────────────────────────────────
@@ -311,6 +370,11 @@ export const STARTER_TEMPLATES: SkillTemplate[] = [
         transform: "Identify entities, properties, and conditional relationships",
       },
     ],
+    tips: [
+      "All clauses must end with a period.",
+      "Use lowercase for atoms (constants), Uppercase for variables.",
+      "Avoid recursive rules on cyclic data — Tau Prolog has no tabling and will loop infinitely.",
+    ],
   },
 
   {
@@ -318,14 +382,13 @@ export const STARTER_TEMPLATES: SkillTemplate[] = [
     domain: "analysis",
     solver: "prolog",
     signature:
-      "Check if node A can reach node B through any path in a directed graph — data flow, dependency chains, call graphs",
+      "Check if node A can reach node B through any path in a directed graph — data flow, dependency chains, call graphs, taint analysis",
     skeleton: `
 % Direct edges in the graph
 {{SLOT:edges}}
 
-% Transitive reachability
-reaches(A, B) :- edge(A, B).
-reaches(A, B) :- edge(A, Mid), reaches(Mid, B).`,
+% Direct neighbor query (use for individual checks)
+neighbor(A, B) :- edge(A, B).`,
     slots: [
       {
         name: "edges",
@@ -340,14 +403,24 @@ reaches(A, B) :- edge(A, Mid), reaches(Mid, B).`,
       },
       {
         source: "data flow",
-        transform:
-          "Map data transformations to edge(source, sink) facts",
+        transform: "Map data transformations to edge(source, sink) facts",
       },
       {
         source: "call graph",
         transform: "Map function calls to edge(caller, callee) facts",
       },
     ],
+    tips: [
+      "WARNING: Do NOT use recursive reaches(A,B) :- edge(A,Mid), reaches(Mid,B) on graphs with cycles — Tau Prolog has no tabling and will loop infinitely.",
+      "For cyclic graphs, query individual edges with edge(X, Y) and drive BFS/DFS from the calling code.",
+      "For acyclic graphs (DAGs like import trees), the recursive rule is safe.",
+      "Query: edge(source, X) to get immediate neighbors, then iterate externally.",
+    ],
+    example: `edge(user_input, handler).
+edge(handler, validator).
+edge(validator, database).
+edge(handler, logger).
+neighbor(A, B) :- edge(A, B).`,
   },
 
   {
@@ -395,14 +468,16 @@ can(User, Action, Resource) :- has_role(User, Role), permission(Role, Action, Re
     normalizations: [
       {
         source: "Django groups/permissions",
-        transform:
-          "Map Group→Permission assignments to role/permission facts, group hierarchy to inherits",
+        transform: "Map Group→Permission assignments to role/permission facts, group hierarchy to inherits",
       },
       {
         source: "Kubernetes RBAC",
-        transform:
-          "Map ClusterRole/Role bindings to role facts, aggregate rules to permission facts",
+        transform: "Map ClusterRole/Role bindings to role facts, aggregate rules to permission facts",
       },
+    ],
+    tips: [
+      "Role hierarchy must be acyclic — if admin inherits editor and editor inherits admin, the recursive rules will loop.",
+      "Query with can(alice, Action, Resource) to enumerate all permissions for a user.",
     ],
   },
 ];

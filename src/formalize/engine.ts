@@ -127,6 +127,14 @@ export class FormalizationEngine {
       ? `\n\nPROLOG QUERY: After filling the template, you will also need to provide a Prolog query goal (ending with a period) that asks the question implied by the problem.`
       : "";
 
+    const tipsSection = template.tips?.length
+      ? `\nTIPS AND PITFALLS:\n${template.tips.map((t) => `  ⚠ ${t}`).join("\n")}`
+      : "";
+
+    const exampleSection = template.example
+      ? `\nWORKED EXAMPLE (for reference — do NOT copy this, write your own):\n${template.example}`
+      : "";
+
     return `TEMPLATE: ${template.name} (${template.solver})
 DESCRIPTION: ${template.signature}
 
@@ -138,6 +146,8 @@ ${slotDescs}
 
 NORMALIZATION GUIDANCE:
 ${normGuidance}
+${tipsSection}
+${exampleSection}
 ${queryNote}
 
 PROBLEM: ${problem}
