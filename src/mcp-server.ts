@@ -20,6 +20,7 @@ import type { SolverResult } from "./solvers/types.js";
 import { runAnalysis } from "./graph/analyses.js";
 import type { AnalysisType } from "./graph/analyses.js";
 import { craftTemplate } from "./skills/craft.js";
+import { parseMermaid } from "./graph/mermaid.js";
 import type { CraftInput } from "./skills/craft.js";
 
 export function getChiasmusHome(): string {
@@ -34,6 +35,9 @@ const TOOLS = [
 SOLVERS:
   z3     — SMT-LIB format → SAT + model | UNSAT + unsatCore | error
   prolog — facts/rules + query goal → answers | error
+
+FORMAT (optional, prolog only):
+  mermaid — parse Mermaid flowchart/stateDiagram → Prolog facts + reachability rules
 
 Z3 RULES:
   ⚠ UNSAT results include unsatCore — use (assert (! expr :named label)) for readable conflict labels
@@ -77,6 +81,12 @@ Z3 EXAMPLE (RBAC conflict):
           items: { type: "string" },
           description:
             "Batch mode: array of Prolog query goals. Runs all against same program. Returns array of results.",
+        },
+        format: {
+          type: "string",
+          enum: ["mermaid"],
+          description:
+            "Input format. 'mermaid': parse Mermaid flowchart/stateDiagram → Prolog facts (prolog solver only)",
         },
         explain: {
           type: "boolean",
@@ -334,9 +344,10 @@ Optional: set test=true with an example to run it through the solver.`,
 
 async function handleVerify(args: Record<string, unknown>): Promise<CallToolResult> {
   const solver = args.solver;
-  const input = args.input;
+  let input = args.input as string | undefined;
   const query = args.query as string | undefined;
   const explain = args.explain as boolean | undefined;
+  const format = args.format as string | undefined;
 
   if (typeof solver !== "string" || typeof input !== "string") {
     return {
@@ -345,6 +356,19 @@ async function handleVerify(args: Record<string, unknown>): Promise<CallToolResu
         error: "Both 'solver' (string) and 'input' (string) are required",
       }) }],
     };
+  }
+
+  // Mermaid preprocessing: convert to Prolog facts
+  if (format === "mermaid") {
+    if (solver !== "prolog") {
+      return {
+        content: [{ type: "text", text: JSON.stringify({
+          status: "error",
+          error: "format='mermaid' is only supported with solver='prolog'",
+        }) }],
+      };
+    }
+    input = parseMermaid(input);
   }
 
   let result: SolverResult;
