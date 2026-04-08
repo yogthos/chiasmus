@@ -143,6 +143,42 @@ Use `chiasmus_graph` when you need structural reasoning about code:
 - **"What breaks if I change X?"** — blast radius via reverse reachability
 - **"Are there circular dependencies?"** — cycle detection in call graphs
 
+## Why `chiasmus_graph` over grep
+
+When an LLM needs to understand code structure, it typically greps for function names and manually traces call chains. This works for direct references but breaks down for transitive questions. Here's a real comparison using chiasmus's own codebase:
+
+**Question: "What's the blast radius of changing `lintSpec`?"**
+
+With grep, this takes multiple rounds — first find direct callers, then callers of those callers, reconstructing the chain manually:
+
+```
+grep lintSpec src/**/*.ts     → found in engine.ts (lintLoop) and mcp-server.ts (handleLint)
+grep lintLoop src/**/*.ts     → called from solve() at lines 75 and 87
+grep handleSolve src/**/*.ts  → called from createChiasmusServer switch...
+```
+
+Three rounds of grep, manual reasoning at each step, and you've still only traced part of the chain. With `chiasmus_graph`, one call gives the complete transitive answer:
+
+```
+chiasmus_graph analysis="impact" target="lintSpec"
+→ ["lintLoop", "handleLint", "solve", "correctionLoop",
+   "handleVerify", "handleSolve", "handleGraph",
+   "createChiasmusServer", "runAnalysis", "runAnalysisFromGraph"]
+```
+
+10 affected functions found in a single call — including paths through `correctionLoop` and `runAnalysis` that the grep approach missed entirely.
+
+The same applies to other structural questions:
+
+| Question | Grep | chiasmus_graph |
+|----------|------|----------------|
+| Impact of changing X | Multiple greps + manual trace; misses transitive paths | 1 call, complete transitive chain |
+| Dead code detection | Grep every function name against all call sites — impractical | 1 call, definitive answer |
+| Can A reach B? | Manually reconstruct call chain across files | 1 call, true/false |
+| Call chain A→B | Multiple greps, mentally reconstruct path | 1 call, exact chain e.g. `[handleSolve,solve,lintLoop,lintSpec]` |
+
+The key difference: grep finds string matches, `chiasmus_graph` answers structural questions. Transitive reachability, dead code, and impact analysis are formally impossible with grep alone.
+
 ## Configuration
 
 | Variable | Default | Purpose |
