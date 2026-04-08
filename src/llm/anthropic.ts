@@ -1,4 +1,5 @@
 import type { LLMAdapter, LLMMessage } from "./types.js";
+import { OpenAICompatibleAdapter } from "./openai-compatible.js";
 
 const DEFAULT_MODEL = "claude-sonnet-4-20250514";
 const DEFAULT_URL = "https://api.anthropic.com/v1/messages";
@@ -59,13 +60,49 @@ export class AnthropicAdapter implements LLMAdapter {
   }
 }
 
-/** Create an LLM adapter from environment variables, or null if not configured */
+/**
+ * Create an LLM adapter from environment variables, or null if not configured.
+ *
+ * Supported providers (checked in order):
+ *   ANTHROPIC_API_KEY  → Anthropic (Claude)
+ *   DEEPSEEK_API_KEY   → DeepSeek
+ *   OPENAI_API_KEY     → OpenAI
+ *
+ * Override base URL with CHIASMUS_API_URL and model with CHIASMUS_MODEL.
+ */
 export function createLLMFromEnv(): LLMAdapter | null {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) return null;
+  const model = process.env.CHIASMUS_MODEL;
+  const customUrl = process.env.CHIASMUS_API_URL;
 
-  return new AnthropicAdapter({
-    apiKey,
-    model: process.env.CHIASMUS_MODEL,
-  });
+  // Anthropic
+  const anthropicKey = process.env.ANTHROPIC_API_KEY;
+  if (anthropicKey) {
+    return new AnthropicAdapter({
+      apiKey: anthropicKey,
+      model,
+      baseUrl: customUrl,
+    });
+  }
+
+  // DeepSeek / OpenAI-compatible
+  const deepseekKey = process.env.DEEPSEEK_API_KEY;
+  if (deepseekKey) {
+    return new OpenAICompatibleAdapter({
+      apiKey: deepseekKey,
+      baseUrl: customUrl ?? "https://api.deepseek.com",
+      model: model ?? "deepseek-chat",
+    });
+  }
+
+  // OpenAI
+  const openaiKey = process.env.OPENAI_API_KEY;
+  if (openaiKey) {
+    return new OpenAICompatibleAdapter({
+      apiKey: openaiKey,
+      baseUrl: customUrl ?? "https://api.openai.com/v1",
+      model: model ?? "gpt-4o",
+    });
+  }
+
+  return null;
 }

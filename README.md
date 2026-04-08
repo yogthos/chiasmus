@@ -111,8 +111,13 @@ Use a solver when the LLM alone can't guarantee correctness:
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `CHIASMUS_HOME` | `~/.chiasmus/` | Database and skill storage |
-| `ANTHROPIC_API_KEY` | — | Optional: enables `chiasmus_solve` autonomous mode for headless/programmatic use |
-| `CHIASMUS_MODEL` | `claude-sonnet-4-20250514` | Model for autonomous mode |
+| `ANTHROPIC_API_KEY` | — | Optional: Anthropic provider for autonomous mode |
+| `DEEPSEEK_API_KEY` | — | Optional: DeepSeek provider for autonomous mode |
+| `OPENAI_API_KEY` | — | Optional: OpenAI provider for autonomous mode |
+| `CHIASMUS_API_URL` | per provider | Override API base URL (e.g. for local models via Ollama) |
+| `CHIASMUS_MODEL` | per provider | Override model name |
+
+Providers are checked in order: Anthropic → DeepSeek → OpenAI. Only one key is needed for autonomous mode (`chiasmus_solve`, `chiasmus_learn`). When used from Claude Code, Crush, or OpenCode, no API key is needed — the calling LLM handles template filling directly.
 
 ## License
 
