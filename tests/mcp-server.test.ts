@@ -140,6 +140,27 @@ describe("Chiasmus MCP Server", () => {
       expect(parsed.status).toBe("error");
     });
 
+    it("includes unsatCore in unsat Z3 response", async () => {
+      const result = await client.callTool({
+        name: "chiasmus_verify",
+        arguments: {
+          solver: "z3",
+          input: `
+            (declare-const x Int)
+            (assert (! (> x 10) :named gt10))
+            (assert (! (< x 5) :named lt5))
+          `,
+        },
+      });
+
+      const content = result.content as Array<{ type: string; text: string }>;
+      const parsed = JSON.parse(content[0].text);
+      expect(parsed.status).toBe("unsat");
+      expect(parsed.unsatCore).toBeDefined();
+      expect(Array.isArray(parsed.unsatCore)).toBe(true);
+      expect(parsed.unsatCore.length).toBeGreaterThan(0);
+    });
+
     it("requires query parameter for prolog solver", async () => {
       const result = await client.callTool({
         name: "chiasmus_verify",

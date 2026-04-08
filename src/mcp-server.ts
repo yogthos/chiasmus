@@ -28,10 +28,11 @@ const TOOLS = [
     description: `Submit formal logic to solver. Returns verified result.
 
 SOLVERS:
-  z3     — SMT-LIB format → SAT + model | UNSAT | error
+  z3     — SMT-LIB format → SAT + model | UNSAT + unsatCore | error
   prolog — facts/rules + query goal → answers | error
 
 Z3 RULES:
+  ⚠ UNSAT results include unsatCore — use (assert (! expr :named label)) for readable conflict labels
   ⚠ No (check-sat)/(get-model) — added automatically
   ⚠ Use (= flag (or ...)) NOT (=> ... flag) — implication → trivially SAT
   ⚠ No (define-fun) with args — breaks model extraction. Use (declare-const) + (assert (=)) instead

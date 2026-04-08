@@ -123,6 +123,76 @@ describe("Z3Solver", () => {
     }
   });
 
+  it("returns unsat core with named assertions for contradictory constraints", async () => {
+    solver = await createZ3Solver();
+    const result = await solver.solve({
+      type: "z3",
+      smtlib: `
+        (declare-const x Int)
+        (assert (! (> x 10) :named gt10))
+        (assert (! (< x 5) :named lt5))
+      `,
+    });
+
+    expect(result.status).toBe("unsat");
+    if (result.status === "unsat") {
+      expect(result.unsatCore).toBeDefined();
+      expect(Array.isArray(result.unsatCore)).toBe(true);
+      expect(result.unsatCore!.length).toBeGreaterThan(0);
+      // Core should reference the named assertions
+      const coreStr = result.unsatCore!.join(" ");
+      expect(coreStr).toMatch(/gt10|lt5/);
+    }
+  });
+
+  it("returns unsat core expressions for contradictory unnamed assertions", async () => {
+    solver = await createZ3Solver();
+    const result = await solver.solve({
+      type: "z3",
+      smtlib: `
+        (declare-const x Int)
+        (assert (> x 10))
+        (assert (< x 5))
+      `,
+    });
+
+    expect(result.status).toBe("unsat");
+    if (result.status === "unsat") {
+      // unsatCore should be present (may be empty if WASM doesn't support unnamed cores)
+      expect(result.unsatCore).toBeDefined();
+      expect(Array.isArray(result.unsatCore)).toBe(true);
+    }
+  });
+
+  it("does not include unsatCore field for SAT results", async () => {
+    solver = await createZ3Solver();
+    const result = await solver.solve({
+      type: "z3",
+      smtlib: `
+        (declare-const x Int)
+        (assert (> x 0))
+        (assert (< x 10))
+      `,
+    });
+
+    expect(result.status).toBe("sat");
+    expect(result).not.toHaveProperty("unsatCore");
+  });
+
+  it("returns unsat core for trivially unsat assertion", async () => {
+    solver = await createZ3Solver();
+    const result = await solver.solve({
+      type: "z3",
+      smtlib: `(assert false)`,
+    });
+
+    expect(result.status).toBe("unsat");
+    if (result.status === "unsat") {
+      expect(result.unsatCore).toBeDefined();
+      expect(Array.isArray(result.unsatCore)).toBe(true);
+    }
+  });
+
   it("returns error for completely empty input", async () => {
     solver = await createZ3Solver();
     const result = await solver.solve({
