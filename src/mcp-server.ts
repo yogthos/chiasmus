@@ -13,6 +13,7 @@ import { SolverSession } from "./solvers/session.js";
 import { SkillLibrary } from "./skills/library.js";
 import { FormalizationEngine } from "./formalize/engine.js";
 import { SkillLearner } from "./skills/learner.js";
+import { lintSpec } from "./formalize/validate.js";
 import { createLLMFromEnv } from "./llm/anthropic.js";
 import type { LLMAdapter } from "./llm/types.js";
 import type { SolverResult } from "./solvers/types.js";
@@ -38,6 +39,7 @@ Z3 RULES:
 PROLOG RULES:
   ⚠ All clauses end with period
   ⚠ No recursive reachability on cyclic graphs — Tau Prolog lacks tabling → infinite loop. Query edges individually, BFS externally.
+  ⚠ Use "queries" param (JSON array) to batch multiple queries against same program in one call
 
 Z3 EXAMPLE (RBAC conflict):
   (declare-datatypes ((Role 0)) (((admin) (editor))))
@@ -63,7 +65,13 @@ Z3 EXAMPLE (RBAC conflict):
         query: {
           type: "string",
           description:
-            "Prolog query goal (required for prolog, ignored for z3). Must end with a period.",
+            "Prolog query goal (required for prolog unless queries is set). Must end with period.",
+        },
+        queries: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Batch mode: array of Prolog query goals. Runs all against same program. Returns array of results.",
         },
       },
       required: ["solver", "input"],
@@ -162,6 +170,29 @@ Needs API key. Flow: chiasmus_verify → chiasmus_learn → template appears in 
       required: ["solver", "spec", "problem"],
     },
   },
+  {
+    name: "chiasmus_lint",
+    description: `Fast structural validation of formal spec without running solver.
+
+Auto-fixes: markdown fences, (check-sat)/(get-model), (set-logic).
+Checks: balanced parens, unfilled {{SLOT:}} markers, missing periods (Prolog).
+Returns cleaned spec + fixes applied + remaining errors.`,
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        solver: {
+          type: "string",
+          enum: ["z3", "prolog"],
+          description: "Solver type for syntax rules",
+        },
+        input: {
+          type: "string",
+          description: "Spec to lint",
+        },
+      },
+      required: ["solver", "input"],
+    },
+  },
 ];
 
 async function handleVerify(args: Record<string, unknown>): Promise<CallToolResult> {
@@ -189,10 +220,28 @@ async function handleVerify(args: Record<string, unknown>): Promise<CallToolResu
         session.dispose();
       }
     } else if (solver === "prolog") {
+      const queries = args.queries as string[] | undefined;
+
+      if (queries && Array.isArray(queries) && queries.length > 0) {
+        // Batch mode: run multiple queries against same program
+        const session = await SolverSession.create("prolog");
+        try {
+          const results: SolverResult[] = [];
+          for (const q of queries) {
+            results.push(await session.solve({ type: "prolog", program: input, query: q }));
+          }
+          return {
+            content: [{ type: "text", text: JSON.stringify(results, null, 2) }],
+          };
+        } finally {
+          session.dispose();
+        }
+      }
+
       if (!query) {
         result = {
           status: "error",
-          error: "The 'query' parameter is required for the prolog solver",
+          error: "'query' or 'queries' parameter required for prolog solver",
         };
       } else {
         const session = await SolverSession.create("prolog");
@@ -399,6 +448,32 @@ async function handleLearn(
   };
 }
 
+function handleLint(args: Record<string, unknown>): CallToolResult {
+  const solver = args.solver;
+  const input = args.input;
+
+  if (typeof solver !== "string" || typeof input !== "string") {
+    return {
+      content: [{ type: "text", text: JSON.stringify({
+        error: "Required: solver (string), input (string)",
+      }) }],
+    };
+  }
+
+  if (solver !== "z3" && solver !== "prolog") {
+    return {
+      content: [{ type: "text", text: JSON.stringify({
+        error: `Unknown solver: ${solver}. Use "z3" or "prolog".`,
+      }) }],
+    };
+  }
+
+  const result = lintSpec(input, solver);
+  return {
+    content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+  };
+}
+
 export async function createChiasmusServer(
   chiasmusHome?: string,
   llmOverride?: LLMAdapter | null,
@@ -439,6 +514,8 @@ export async function createChiasmusServer(
         return handleSolve(formalizer, library, args ?? {});
       case "chiasmus_learn":
         return handleLearn(learner, args ?? {});
+      case "chiasmus_lint":
+        return handleLint(args ?? {});
       default:
         return {
           content: [

@@ -302,4 +302,94 @@ describe("Chiasmus MCP Server", () => {
       expect(parsed.error).toMatch(/problem/i);
     });
   });
+
+  describe("chiasmus_verify batch queries", () => {
+    it("runs multiple Prolog queries against same program", async () => {
+      const result = await client.callTool({
+        name: "chiasmus_verify",
+        arguments: {
+          solver: "prolog",
+          input: "edge(a, b). edge(b, c). edge(c, d).",
+          queries: ["edge(a, X).", "edge(b, X).", "edge(c, X)."],
+        },
+      });
+
+      const content = result.content as Array<{ type: string; text: string }>;
+      const parsed = JSON.parse(content[0].text);
+      expect(Array.isArray(parsed)).toBe(true);
+      expect(parsed).toHaveLength(3);
+      expect(parsed[0].status).toBe("success");
+      expect(parsed[0].answers[0].bindings.X).toBe("b");
+      expect(parsed[1].answers[0].bindings.X).toBe("c");
+      expect(parsed[2].answers[0].bindings.X).toBe("d");
+    });
+  });
+
+  describe("chiasmus_lint", () => {
+    it("lists chiasmus_lint in available tools", async () => {
+      const tools = await client.listTools();
+      const names = tools.tools.map((t) => t.name);
+      expect(names).toContain("chiasmus_lint");
+    });
+
+    it("auto-fixes check-sat in Z3 spec", async () => {
+      const result = await client.callTool({
+        name: "chiasmus_lint",
+        arguments: {
+          solver: "z3",
+          input: "(declare-const x Int)\n(assert (> x 5))\n(check-sat)",
+        },
+      });
+
+      const content = result.content as Array<{ type: string; text: string }>;
+      const parsed = JSON.parse(content[0].text);
+      expect(parsed.errors).toHaveLength(0);
+      expect(parsed.fixes.length).toBeGreaterThan(0);
+      expect(parsed.spec).not.toContain("check-sat");
+    });
+
+    it("catches unbalanced parentheses", async () => {
+      const result = await client.callTool({
+        name: "chiasmus_lint",
+        arguments: {
+          solver: "z3",
+          input: "(declare-const x Int)\n(assert (> x 5)",
+        },
+      });
+
+      const content = result.content as Array<{ type: string; text: string }>;
+      const parsed = JSON.parse(content[0].text);
+      expect(parsed.errors.length).toBeGreaterThan(0);
+    });
+
+    it("catches missing periods in Prolog", async () => {
+      const result = await client.callTool({
+        name: "chiasmus_lint",
+        arguments: {
+          solver: "prolog",
+          input: "parent(tom, bob)\nparent(bob, ann)",
+        },
+      });
+
+      const content = result.content as Array<{ type: string; text: string }>;
+      const parsed = JSON.parse(content[0].text);
+      expect(parsed.errors.length).toBeGreaterThan(0);
+      expect(parsed.errors[0]).toMatch(/period/i);
+    });
+
+    it("passes clean spec with no issues", async () => {
+      const result = await client.callTool({
+        name: "chiasmus_lint",
+        arguments: {
+          solver: "z3",
+          input: "(declare-const x Int)\n(assert (> x 5))",
+        },
+      });
+
+      const content = result.content as Array<{ type: string; text: string }>;
+      const parsed = JSON.parse(content[0].text);
+      expect(parsed.errors).toHaveLength(0);
+      expect(parsed.fixes).toHaveLength(0);
+    });
+  });
 });
