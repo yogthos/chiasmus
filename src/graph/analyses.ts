@@ -33,7 +33,7 @@ export async function runAnalysis(
     content: readFileSync(p, "utf-8"),
   }));
 
-  const graph = extractGraph(files);
+  const graph = await extractGraph(files);
   const program = graphToProlog(graph, request.entryPoints);
 
   if (request.analysis === "facts") {

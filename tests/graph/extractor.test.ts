@@ -2,8 +2,8 @@ import { describe, it, expect } from "vitest";
 import { extractGraph } from "../../src/graph/extractor.js";
 
 describe("extractGraph", () => {
-  it("extracts function declarations", () => {
-    const graph = extractGraph([{
+  it("extracts function declarations", async () => {
+    const graph = await extractGraph([{
       path: "test.ts",
       content: `
         function handleRequest() {}
@@ -18,8 +18,8 @@ describe("extractGraph", () => {
     expect(graph.defines.every((d) => d.file === "test.ts")).toBe(true);
   });
 
-  it("extracts arrow functions assigned to const", () => {
-    const graph = extractGraph([{
+  it("extracts arrow functions assigned to const", async () => {
+    const graph = await extractGraph([{
       path: "test.ts",
       content: `const processData = (x: number) => { return x; };`,
     }]);
@@ -28,8 +28,8 @@ describe("extractGraph", () => {
     expect(names).toContain("processData");
   });
 
-  it("extracts call relationships", () => {
-    const graph = extractGraph([{
+  it("extracts call relationships", async () => {
+    const graph = await extractGraph([{
       path: "test.ts",
       content: `
         function a() { b(); c(); }
@@ -44,8 +44,8 @@ describe("extractGraph", () => {
     expect(callPairs).toContain("b->c");
   });
 
-  it("extracts method calls from member expressions", () => {
-    const graph = extractGraph([{
+  it("extracts method calls from member expressions", async () => {
+    const graph = await extractGraph([{
       path: "test.ts",
       content: `
         function foo() { this.bar(); obj.baz(); }
@@ -59,8 +59,8 @@ describe("extractGraph", () => {
     expect(callees).toContain("baz");
   });
 
-  it("extracts class with methods and produces defines + contains", () => {
-    const graph = extractGraph([{
+  it("extracts class with methods and produces defines + contains", async () => {
+    const graph = await extractGraph([{
       path: "test.ts",
       content: `
         class MyService {
@@ -84,8 +84,8 @@ describe("extractGraph", () => {
     expect(containsPairs).toContain("MyService->validate");
   });
 
-  it("extracts import statements", () => {
-    const graph = extractGraph([{
+  it("extracts import statements", async () => {
+    const graph = await extractGraph([{
       path: "test.ts",
       content: `import { query, validate } from './db';`,
     }]);
@@ -97,8 +97,8 @@ describe("extractGraph", () => {
     expect(graph.imports.every((i) => i.source === "./db")).toBe(true);
   });
 
-  it("extracts export statements", () => {
-    const graph = extractGraph([{
+  it("extracts export statements", async () => {
+    const graph = await extractGraph([{
       path: "test.ts",
       content: `
         export function main() {}
@@ -111,8 +111,8 @@ describe("extractGraph", () => {
     expect(exportNames).toContain("helper");
   });
 
-  it("combines facts across multiple files", () => {
-    const graph = extractGraph([
+  it("combines facts across multiple files", async () => {
+    const graph = await extractGraph([
       {
         path: "server.ts",
         content: `
@@ -141,8 +141,8 @@ describe("extractGraph", () => {
     expect(exportNames).toContain("query");
   });
 
-  it("deduplicates call edges", () => {
-    const graph = extractGraph([{
+  it("deduplicates call edges", async () => {
+    const graph = await extractGraph([{
       path: "test.ts",
       content: `function a() { b(); b(); b(); }
                 function b() {}`,
@@ -152,8 +152,8 @@ describe("extractGraph", () => {
     expect(aToBCalls).toHaveLength(1);
   });
 
-  it("skips unsupported file extensions", () => {
-    const graph = extractGraph([{
+  it("skips unsupported file extensions", async () => {
+    const graph = await extractGraph([{
       path: "test.rb",
       content: `def hello; puts "hi"; end`,
     }]);
