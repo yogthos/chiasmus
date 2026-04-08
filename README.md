@@ -11,7 +11,7 @@ npm install -g chiasmus
 ### Claude Code
 
 ```bash
-claude mcp add chiasmus -- npx chiasmus
+claude mcp add chiasmus -- npx -y chiasmus
 ```
 
 Or add to `~/.claude/settings.json`:
@@ -21,7 +21,7 @@ Or add to `~/.claude/settings.json`:
   "mcpServers": {
     "chiasmus": {
       "command": "npx",
-      "args": ["chiasmus"]
+      "args": ["-y", "chiasmus"]
     }
   }
 }
@@ -37,7 +37,7 @@ Add to `crush.json`:
     "chiasmus": {
       "type": "stdio",
       "command": "npx",
-      "args": ["chiasmus"]
+      "args": ["-y", "chiasmus"]
     }
   }
 }
@@ -52,7 +52,7 @@ Add to `opencode.json`:
   "mcp": {
     "chiasmus": {
       "type": "local",
-      "command": ["npx", "chiasmus"]
+      "command": ["npx", "-y", "chiasmus"]
     }
   }
 }
