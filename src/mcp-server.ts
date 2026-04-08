@@ -223,12 +223,21 @@ async function handleVerify(args: Record<string, unknown>): Promise<CallToolResu
       const queries = args.queries as string[] | undefined;
 
       if (queries && Array.isArray(queries) && queries.length > 0) {
+        // Validate all items are strings
+        if (queries.some((q) => typeof q !== "string")) {
+          return {
+            content: [{ type: "text", text: JSON.stringify({
+              status: "error",
+              error: "queries array must contain only strings",
+            }) }],
+          };
+        }
         // Batch mode: run multiple queries against same program
         const session = await SolverSession.create("prolog");
         try {
           const results: SolverResult[] = [];
           for (const q of queries) {
-            results.push(await session.solve({ type: "prolog", program: input, query: q }));
+            results.push(await session.solve({ type: "prolog", program: input, query: q as string }));
           }
           return {
             content: [{ type: "text", text: JSON.stringify(results, null, 2) }],
