@@ -124,6 +124,94 @@ describe("PrologSolver", () => {
     }
   });
 
+  describe("derivation traces", () => {
+    it("returns trace for rule chain when explain=true", async () => {
+      solver = createPrologSolver();
+      const result = await solver.solve({
+        type: "prolog",
+        program: `
+          parent(tom, bob).
+          parent(bob, ann).
+          ancestor(X, Y) :- parent(X, Y).
+          ancestor(X, Y) :- parent(X, Z), ancestor(Z, Y).
+        `,
+        query: "ancestor(tom, Who).",
+        explain: true,
+      });
+
+      expect(result.status).toBe("success");
+      if (result.status === "success") {
+        expect(result.answers.length).toBeGreaterThan(0);
+        // Trace should be present and show fired rules
+        expect(result.trace).toBeDefined();
+        expect(Array.isArray(result.trace)).toBe(true);
+        expect(result.trace!.length).toBeGreaterThan(0);
+        // Should contain ancestor rule applications
+        const traceStr = result.trace!.join(" ");
+        expect(traceStr).toMatch(/ancestor/);
+      }
+    });
+
+    it("returns no trace when explain is false (default)", async () => {
+      solver = createPrologSolver();
+      const result = await solver.solve({
+        type: "prolog",
+        program: `
+          parent(tom, bob).
+          ancestor(X, Y) :- parent(X, Y).
+        `,
+        query: "ancestor(tom, X).",
+      });
+
+      expect(result.status).toBe("success");
+      if (result.status === "success") {
+        expect(result.trace).toBeUndefined();
+      }
+    });
+
+    it("returns trace for ground query with explain=true", async () => {
+      solver = createPrologSolver();
+      const result = await solver.solve({
+        type: "prolog",
+        program: `
+          parent(tom, bob).
+          ancestor(X, Y) :- parent(X, Y).
+        `,
+        query: "ancestor(tom, bob).",
+        explain: true,
+      });
+
+      expect(result.status).toBe("success");
+      if (result.status === "success") {
+        expect(result.trace).toBeDefined();
+        expect(result.trace!.length).toBeGreaterThan(0);
+      }
+    });
+
+    it("returns trace with multiple rule applications", async () => {
+      solver = createPrologSolver();
+      const result = await solver.solve({
+        type: "prolog",
+        program: `
+          edge(a, b).
+          edge(b, c).
+          path(X, Y) :- edge(X, Y).
+          path(X, Y) :- edge(X, Z), path(Z, Y).
+        `,
+        query: "path(a, c).",
+        explain: true,
+      });
+
+      expect(result.status).toBe("success");
+      if (result.status === "success") {
+        expect(result.trace).toBeDefined();
+        const traceStr = result.trace!.join(" ");
+        // Should show path rule applications
+        expect(traceStr).toMatch(/path/);
+      }
+    });
+  });
+
   it("handles list operations", async () => {
     solver = createPrologSolver();
     const result = await solver.solve({
