@@ -297,7 +297,10 @@ function handleSkills(
       };
     }
     return {
-      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      content: [{ type: "text", text: JSON.stringify({
+        ...result,
+        related: library.getRelated(name),
+      }, null, 2) }],
     };
   }
 
@@ -319,6 +322,7 @@ function handleSkills(
 
 async function handleFormalize(
   formalizer: FormalizationEngine,
+  library: SkillLibrary,
   args: Record<string, unknown>,
 ): Promise<CallToolResult> {
   if (typeof args.problem !== "string" || !args.problem) {
@@ -329,6 +333,7 @@ async function handleFormalize(
   const problem = args.problem;
 
   const result = await formalizer.formalize(problem);
+  const suggestions = library.getRelated(result.template.name);
   return {
     content: [{
       type: "text",
@@ -337,6 +342,7 @@ async function handleFormalize(
         solver: result.template.solver,
         domain: result.template.domain,
         instructions: result.instructions,
+        suggestions,
       }, null, 2),
     }],
   };
@@ -518,7 +524,7 @@ export async function createChiasmusServer(
       case "chiasmus_skills":
         return handleSkills(library, args ?? {});
       case "chiasmus_formalize":
-        return handleFormalize(formalizeEngine, args ?? {});
+        return handleFormalize(formalizeEngine, library, args ?? {});
       case "chiasmus_solve":
         return handleSolve(formalizer, library, args ?? {});
       case "chiasmus_learn":

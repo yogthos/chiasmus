@@ -11,6 +11,7 @@ import type {
   SkillSearchResult,
 } from "./types.js";
 import type { SolverType } from "../solvers/types.js";
+import { getRelatedTemplates, type RelatedTemplate } from "./relationships.js";
 
 export interface SearchOptions {
   domain?: string;
@@ -89,6 +90,11 @@ export class SkillLibrary {
     const t = this.templates.get(name);
     if (!t) return null;
     return { template: t, metadata: this.loadMetadata(name) };
+  }
+
+  /** Get templates related to the given template */
+  getRelated(name: string): RelatedTemplate[] {
+    return getRelatedTemplates(name);
   }
 
   /** Search templates by natural language query */
