@@ -24,49 +24,29 @@ export function getChiasmusHome(): string {
 const TOOLS = [
   {
     name: "chiasmus_verify",
-    description: `Submit raw formal logic to a solver and get a verified result.
+    description: `Submit formal logic to solver. Returns verified result.
 
 SOLVERS:
-  z3      — SMT solver. Input is SMT-LIB format. Returns SAT + model, UNSAT, or error.
-  prolog  — ISO Prolog. Input is facts/rules, query is a Prolog goal. Returns answers or error.
+  z3     — SMT-LIB format → SAT + model | UNSAT | error
+  prolog — facts/rules + query goal → answers | error
 
-WHEN TO USE:
-  - Verify constraints: "can these rules ever conflict?"
-  - Check satisfiability: "is there a valid assignment?"
-  - Prove/disprove: "is this always true for all inputs?"
-  - Derive conclusions: "what follows from these facts and rules?"
+Z3 RULES:
+  ⚠ No (check-sat)/(get-model) — added automatically
+  ⚠ Use (= flag (or ...)) NOT (=> ... flag) — implication → trivially SAT
+  ⚠ No (define-fun) with args — breaks model extraction. Use (declare-const) + (assert (=)) instead
 
-IMPORTANT Z3 TIPS:
-  - Do NOT include (check-sat) or (get-model) — added automatically.
-  - Use biconditional (= flag (or ...)) not implication (=> ... flag) for boolean flags.
-    Implications make formulas trivially satisfiable.
-  - Do NOT use (define-fun name ((arg Type)) ...) — breaks model extraction.
-    Use (declare-const name Bool) + (assert (= name expr)) instead.
+PROLOG RULES:
+  ⚠ All clauses end with period
+  ⚠ No recursive reachability on cyclic graphs — Tau Prolog lacks tabling → infinite loop. Query edges individually, BFS externally.
 
-IMPORTANT PROLOG TIPS:
-  - All clauses must end with a period.
-  - WARNING: Recursive reachability rules loop infinitely on cyclic graphs.
-    Tau Prolog has no tabling. Query edges individually and drive BFS externally.
-
-EXAMPLES:
-  Z3 (check if RBAC rules conflict):
-    solver: "z3"
-    input: |
-      (declare-datatypes ((Role 0)) (((admin) (editor))))
-      (declare-datatypes ((Action 0)) (((read) (write))))
-      (declare-const r Role)
-      (declare-const a Action)
-      (declare-const allowed Bool)
-      (declare-const denied Bool)
-      (assert (= allowed (or (and (= r admin) (= a read)) (and (= r editor) (= a write)))))
-      (assert (= denied (or (and (= r editor) (= a write)))))
-      (assert allowed)
-      (assert denied)
-
-  Prolog (derive permissions):
-    solver: "prolog"
-    input: "role(alice, admin). can_access(X, resource) :- role(X, admin)."
-    query: "can_access(alice, resource)."`,
+Z3 EXAMPLE (RBAC conflict):
+  (declare-datatypes ((Role 0)) (((admin) (editor))))
+  (declare-datatypes ((Action 0)) (((read) (write))))
+  (declare-const r Role) (declare-const a Action)
+  (declare-const allowed Bool) (declare-const denied Bool)
+  (assert (= allowed (or (and (= r admin) (= a read)) (and (= r editor) (= a write)))))
+  (assert (= denied (or (and (= r editor) (= a write)))))
+  (assert allowed) (assert denied)`,
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -91,22 +71,12 @@ EXAMPLES:
   },
   {
     name: "chiasmus_skills",
-    description: `Search and list formalization templates in the skill library.
+    description: `Search/list formalization templates. Returns skeletons, slots, normalization recipes, usage metadata.
 
-Returns matching templates with their skeletons, slot definitions, normalization recipes,
-and usage metadata (reuse count, success rate).
-
-Use this to find an appropriate template before calling chiasmus_verify or chiasmus_solve.
-
-EXAMPLES:
-  Search for authorization templates:
-    query: "check if access control policies conflict"
-
-  List all Prolog templates:
-    solver: "prolog"
-
-  Get a specific template:
-    name: "policy-contradiction"`,
+Find template before chiasmus_verify or chiasmus_formalize.
+  query: "access control policies conflict" → search
+  solver: "prolog" → filter by solver
+  name: "policy-contradiction" → exact lookup`,
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -132,18 +102,12 @@ EXAMPLES:
   },
   {
     name: "chiasmus_formalize",
-    description: `Find the best formalization template for a problem and return it with slot-filling instructions.
+    description: `Find best template for problem → return skeleton + slot-filling instructions + tips.
 
-This is a GUIDED workflow: the tool finds the right template and tells you how to fill it.
-You then fill the slots and submit the result via chiasmus_verify.
-
-WORKFLOW:
-  1. Call chiasmus_formalize with your problem description
-  2. Read the returned template, slots, and normalization guidance
-  3. Fill the template slots based on the guidance
-  4. Submit the filled specification via chiasmus_verify
-
-Use this when you want full control over the formalization process.`,
+Guided workflow:
+  1. chiasmus_formalize → get template + slots + tips
+  2. Fill slots using your context
+  3. chiasmus_verify → verified result`,
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -157,17 +121,10 @@ Use this when you want full control over the formalization process.`,
   },
   {
     name: "chiasmus_solve",
-    description: `End-to-end: formalize a problem and verify it automatically.
+    description: `End-to-end: select template → fill slots → lint → verify → correction loop.
 
-Uses an LLM to select a template, fill slots, and run the correction loop.
-Requires ANTHROPIC_API_KEY to be set. Without it, falls back to returning
-template instructions (same as chiasmus_formalize).
-
-WHEN TO USE:
-  - You want a fully automated solve pipeline
-  - The problem maps to a known domain (authorization, config, dependency, rules, reachability)
-
-Returns the verified solver result, the template used, and correction loop history.`,
+Needs ANTHROPIC_API_KEY | DEEPSEEK_API_KEY | OPENAI_API_KEY. Without key → falls back to chiasmus_formalize.
+Returns: verified result + template used + correction history.`,
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -181,19 +138,10 @@ Returns the verified solver result, the template used, and correction loop histo
   },
   {
     name: "chiasmus_learn",
-    description: `Extract a reusable template from a verified solution and add it to the skill library.
+    description: `Extract reusable template from verified solution → add to skill library.
 
-After solving a problem with chiasmus_verify, call this to generalize the solution into a
-reusable template. The template is stored as a candidate — it gets promoted to full status
-after being successfully reused ${3} times.
-
-Requires ANTHROPIC_API_KEY for template extraction (uses LLM to generalize).
-
-WORKFLOW:
-  1. Solve a problem with chiasmus_verify
-  2. Call chiasmus_learn with the verified spec and problem description
-  3. The extracted template appears in chiasmus_skills searches
-  4. Future similar problems can use the template via chiasmus_formalize`,
+Generalizes concrete spec into parameterized template. Stored as candidate → promoted after 3+ successful reuses.
+Needs API key. Flow: chiasmus_verify → chiasmus_learn → template appears in chiasmus_skills.`,
     inputSchema: {
       type: "object" as const,
       properties: {

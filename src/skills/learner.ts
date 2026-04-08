@@ -7,26 +7,12 @@ const PROMOTION_THRESHOLD = 3;
 const PROMOTION_SUCCESS_RATE = 0.6;
 const DEDUP_SIMILARITY_THRESHOLD = 0.7;
 
-const EXTRACT_SYSTEM = `You are a template extraction engine. Given a verified formal specification and the problem it solved, extract a REUSABLE template.
+const EXTRACT_SYSTEM = `Extract reusable template from verified spec.
 
-Your job:
-1. Identify which parts are problem-specific (concrete values) vs structural (the pattern)
-2. Replace concrete values with {{SLOT:name}} markers
-3. Name and describe each slot
-4. Write a general signature that describes the class of problems this template solves
-5. Suggest normalization recipes for common input formats
+Concrete values → {{SLOT:name}} markers. Name each slot. Write general signature. Suggest normalizations.
 
-Return a JSON object with these fields:
-{
-  "name": "kebab-case-name",
-  "domain": "one of: authorization, configuration, dependency, validation, rules, analysis",
-  "signature": "Natural language description of what class of problems this solves",
-  "slots": [{ "name": "slot_name", "description": "what goes here", "format": "example" }],
-  "normalizations": [{ "source": "input format", "transform": "how to map it" }],
-  "skeleton": "the template with {{SLOT:name}} markers"
-}
-
-Return ONLY valid JSON, no markdown fences, no explanation.`;
+Return JSON only — no fences, no explanation:
+{"name":"kebab-case","domain":"authorization|configuration|dependency|validation|rules|analysis","signature":"what class of problems this solves","slots":[{"name":"x","description":"what","format":"example"}],"normalizations":[{"source":"format","transform":"how"}],"skeleton":"template with {{SLOT:name}}"}`;
 
 export class SkillLearner {
   constructor(

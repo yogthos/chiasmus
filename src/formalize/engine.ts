@@ -23,32 +23,19 @@ export interface SolveResult {
   answers: PrologAnswer[];
 }
 
-const FORMALIZE_SYSTEM = `You are a formalization engine that translates natural language problems into formal logic specifications.
+const FORMALIZE_SYSTEM = `Formalization engine. Translate natural language → formal logic.
 
-Your job:
-1. Read the problem description
-2. Read the template skeleton and slot descriptions
-3. Use the template as a STARTING POINT — fill the slots, but also adapt the structure if the problem requires it
-4. You may add extra variables, assertions, or rules beyond what the template defines
-5. You may remove or restructure parts of the skeleton that don't fit the specific problem
-6. Return ONLY the complete specification — no explanation, no markdown fences, no comments outside the spec
+Template = starting point. Fill slots, but adapt structure if needed. Add/remove variables, assertions, rules.
+Output ONLY complete spec. No explanation, no markdown fences.
 
-The template is guidance, not a constraint. The goal is a correct specification for the problem, not a rigid fill-in-the-blanks.
+Z3: valid SMT-LIB. No (check-sat)/(get-model). Use (= flag (or ...)) not (=> ... flag).
+Prolog: valid ISO Prolog. All clauses end with period.
 
-For Z3 (SMT-LIB): output valid SMT-LIB assertions. Do NOT include (check-sat) or (get-model).
-For Prolog: output valid ISO Prolog facts and rules.
+Precise syntax — spec goes directly to solver.`;
 
-Be precise with syntax. The specification will be fed directly to a solver.`;
+const FIX_SYSTEM = `Fix failed formal spec. Return ONLY corrected spec. No explanation, no fences.
 
-const FIX_SYSTEM = `You are a formal logic repair engine. You receive a specification that failed verification and the error message from the solver.
-
-Fix the specification to resolve the error. Return ONLY the corrected specification — no explanation, no markdown fences.
-
-Common issues:
-- Type mismatches: ensure all comparisons use matching types
-- Missing declarations: every constant must be declared before use
-- Syntax errors: check parentheses, commas, periods
-- For Prolog: ensure all clauses end with a period`;
+Common fixes: type mismatches → matching types | missing declarations → declare before use | unbalanced parens | Prolog missing periods.`;
 
 export class FormalizationEngine {
   constructor(
@@ -124,39 +111,33 @@ export class FormalizationEngine {
       .join("\n");
 
     const queryNote = template.solver === "prolog"
-      ? `\n\nPROLOG QUERY: After filling the template, you will also need to provide a Prolog query goal (ending with a period) that asks the question implied by the problem.`
+      ? `\nAlso provide Prolog query goal (ending with period) for the question.`
       : "";
 
     const tipsSection = template.tips?.length
-      ? `\nTIPS AND PITFALLS:\n${template.tips.map((t) => `  ⚠ ${t}`).join("\n")}`
+      ? `\n⚠ TIPS:\n${template.tips.map((t) => `  ${t}`).join("\n")}`
       : "";
 
     const exampleSection = template.example
-      ? `\nWORKED EXAMPLE (for reference — do NOT copy this, write your own):\n${template.example}`
+      ? `\nEXAMPLE (reference only — write your own):\n${template.example}`
       : "";
 
-    return `TEMPLATE: ${template.name} (${template.solver})
-DESCRIPTION: ${template.signature}
+    return `${template.name} (${template.solver}) — ${template.signature}
 
 SKELETON:
 ${template.skeleton}
 
-SLOTS TO FILL:
+SLOTS:
 ${slotDescs}
 
-NORMALIZATION GUIDANCE:
-${normGuidance}
-${tipsSection}
-${exampleSection}
-${queryNote}
+NORMALIZE: ${normGuidance}
+${tipsSection}${exampleSection}${queryNote}
 
 PROBLEM: ${problem}
 
-Fill each {{SLOT:name}} in the skeleton with appropriate ${template.solver === "z3" ? "SMT-LIB" : "Prolog"} code.
-The template is a STARTING POINT — adapt the structure if the problem requires it.
-You may add extra variables, assertions, or rules. You may remove or restructure parts that don't fit.
-${template.solver === "z3" ? "Do NOT include (check-sat) or (get-model) — the tool adds these automatically." : "Ensure all clauses end with a period."}
-Return only the complete filled specification.`;
+Fill {{SLOT:name}} markers. Template = starting point — adapt if needed. Add/remove parts freely.
+${template.solver === "z3" ? "No (check-sat)/(get-model)." : "All clauses end with period."}
+Output ONLY filled spec.`;
   }
 
   private async llmFill(problem: string, template: SkillTemplate): Promise<string> {

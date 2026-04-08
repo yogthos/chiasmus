@@ -63,9 +63,9 @@ export const STARTER_TEMPLATES: SkillTemplate[] = [
       },
     ],
     tips: [
-      "CRITICAL: Use biconditional (=) not implication (=>) for allowed/denied. Implications make the formula trivially satisfiable.",
-      "Do NOT use define-fun with arguments — it breaks model extraction. Use declare-const + (assert (= ...)) instead.",
-      "The model will include r, a, res values showing the exact conflicting request.",
+      "Use (= flag (or ...)) NOT (=> ... flag) — implication → trivially SAT",
+      "No define-fun with args — breaks model. Use declare-const + (assert (=))",
+      "Model returns r, a, res = exact conflicting request",
     ],
     example: `(declare-datatypes ((Role 0)) (((admin) (editor))))
 (declare-datatypes ((Action 0)) (((read) (write))))
@@ -139,8 +139,8 @@ export const STARTER_TEMPLATES: SkillTemplate[] = [
       },
     ],
     tips: [
-      "Use biconditional (=) for can_access, not implication (=>).",
-      "SAT means access is possible; UNSAT means the principal can never reach the resource.",
+      "Use (=) not (=>) for can_access",
+      "SAT = access possible | UNSAT = unreachable",
     ],
   },
 
@@ -192,8 +192,8 @@ export const STARTER_TEMPLATES: SkillTemplate[] = [
       },
     ],
     tips: [
-      "Use biconditional (=) to define result variables from expressions.",
-      "SAT means configs differ — the model shows the diverging input. UNSAT means they're equivalent.",
+      "Use (=) to define result vars",
+      "SAT = configs differ (model = diverging input) | UNSAT = equivalent",
     ],
     example: `(declare-const port Int)
 
@@ -257,8 +257,8 @@ export const STARTER_TEMPLATES: SkillTemplate[] = [
       },
     ],
     tips: [
-      "For discrete version sets, use (or (= pkg 1) (= pkg 2)) not (and (>= pkg 1) (<= pkg 2)) — the latter allows non-integer values.",
-      "SAT returns a valid assignment. UNSAT means no compatible versions exist.",
+      "Discrete versions: (or (= pkg 1) (= pkg 2)) not (and (>= 1) (<= 2)) — latter allows non-integers",
+      "SAT = valid assignment | UNSAT = no solution",
     ],
     example: `(declare-const app Int)
 (declare-const lib Int)
@@ -317,10 +317,9 @@ export const STARTER_TEMPLATES: SkillTemplate[] = [
       },
     ],
     tips: [
-      "Use biconditional (=) to define passes_a/passes_b from conditions.",
-      "SAT means a gap exists — the model shows a concrete input that passes A but fails B.",
-      "Run twice (swap A and B) to check gaps in both directions.",
-      "For per-field gaps, run a separate check per field rather than one big formula.",
+      "Use (=) to define passes_a/passes_b",
+      "SAT = gap exists (model = concrete counterexample) | UNSAT = no gap",
+      "Swap A/B to check both directions. Per-field: separate check per field.",
     ],
     example: `(declare-const age Int)
 
@@ -371,9 +370,8 @@ export const STARTER_TEMPLATES: SkillTemplate[] = [
       },
     ],
     tips: [
-      "All clauses must end with a period.",
-      "Use lowercase for atoms (constants), Uppercase for variables.",
-      "Avoid recursive rules on cyclic data — Tau Prolog has no tabling and will loop infinitely.",
+      "All clauses end with period. Lowercase = atoms, Uppercase = variables.",
+      "No recursive rules on cyclic data — Tau Prolog lacks tabling → infinite loop.",
     ],
   },
 
@@ -411,10 +409,8 @@ neighbor(A, B) :- edge(A, B).`,
       },
     ],
     tips: [
-      "WARNING: Do NOT use recursive reaches(A,B) :- edge(A,Mid), reaches(Mid,B) on graphs with cycles — Tau Prolog has no tabling and will loop infinitely.",
-      "For cyclic graphs, query individual edges with edge(X, Y) and drive BFS/DFS from the calling code.",
-      "For acyclic graphs (DAGs like import trees), the recursive rule is safe.",
-      "Query: edge(source, X) to get immediate neighbors, then iterate externally.",
+      "⚠ No recursive reaches/2 on cyclic graphs — infinite loop (no tabling)",
+      "Cyclic: query edge(X,Y) individually, BFS externally. DAGs: recursive rule safe.",
     ],
     example: `edge(user_input, handler).
 edge(handler, validator).
@@ -476,8 +472,8 @@ can(User, Action, Resource) :- has_role(User, Role), permission(Role, Action, Re
       },
     ],
     tips: [
-      "Role hierarchy must be acyclic — if admin inherits editor and editor inherits admin, the recursive rules will loop.",
-      "Query with can(alice, Action, Resource) to enumerate all permissions for a user.",
+      "Role hierarchy must be acyclic — cycles → infinite loop",
+      "can(alice, Action, Resource) → enumerate all permissions for user",
     ],
   },
 ];
