@@ -166,42 +166,56 @@ Returns the verified solver result, the template used, and correction loop histo
 ];
 
 async function handleVerify(args: Record<string, unknown>): Promise<CallToolResult> {
-  const solver = args.solver as string;
-  const input = args.input as string;
+  const solver = args.solver;
+  const input = args.input;
   const query = args.query as string | undefined;
+
+  if (typeof solver !== "string" || typeof input !== "string") {
+    return {
+      content: [{ type: "text", text: JSON.stringify({
+        status: "error",
+        error: "Both 'solver' (string) and 'input' (string) are required",
+      }) }],
+    };
+  }
 
   let result: SolverResult;
 
-  if (solver === "z3") {
-    const session = await SolverSession.create("z3");
-    try {
-      result = await session.solve({ type: "z3", smtlib: input });
-    } finally {
-      session.dispose();
-    }
-  } else if (solver === "prolog") {
-    if (!query) {
-      result = {
-        status: "error",
-        error: "The 'query' parameter is required for the prolog solver",
-      };
-    } else {
-      const session = await SolverSession.create("prolog");
+  try {
+    if (solver === "z3") {
+      const session = await SolverSession.create("z3");
       try {
-        result = await session.solve({
-          type: "prolog",
-          program: input,
-          query,
-        });
+        result = await session.solve({ type: "z3", smtlib: input });
       } finally {
         session.dispose();
       }
+    } else if (solver === "prolog") {
+      if (!query) {
+        result = {
+          status: "error",
+          error: "The 'query' parameter is required for the prolog solver",
+        };
+      } else {
+        const session = await SolverSession.create("prolog");
+        try {
+          result = await session.solve({
+            type: "prolog",
+            program: input,
+            query,
+          });
+        } finally {
+          session.dispose();
+        }
+      }
+    } else {
+      result = {
+        status: "error",
+        error: `Unknown solver: ${solver}. Use "z3" or "prolog".`,
+      };
     }
-  } else {
-    result = {
-      status: "error",
-      error: `Unknown solver: ${solver}. Use "z3" or "prolog".`,
-    };
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    result = { status: "error", error: `Solver initialization failed: ${msg}` };
   }
 
   return {

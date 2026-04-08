@@ -188,14 +188,18 @@ Fix the specification and return only the corrected version.`,
       return { type: "z3", smtlib: spec };
     }
 
-    // For Prolog, try to extract query from the spec if it contains ?-
-    const queryMatch = spec.match(/\?\-\s*(.+\.)\s*$/m);
+    // For Prolog, extract ?- query from the last line that starts with ?-
+    const lines = spec.split("\n");
     let program = spec;
     let query = "true.";
 
-    if (queryMatch) {
-      query = queryMatch[1];
-      program = spec.replace(/\?\-\s*.+\.\s*$/m, "").trim();
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const trimmed = lines[i].trim();
+      if (trimmed.startsWith("?-")) {
+        query = trimmed.replace(/^\?\-\s*/, "");
+        program = lines.slice(0, i).join("\n").trim();
+        break;
+      }
     }
 
     return { type: "prolog", program, query };
@@ -211,6 +215,7 @@ Fix the specification and return only the corrected version.`,
     maxAttempts: number,
   ): Promise<string> {
     let current = spec;
+    const seenErrors = new Set<string>();
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       const lint = lintSpec(current, template.solver);
@@ -219,6 +224,13 @@ Fix the specification and return only the corrected version.`,
       if (lint.errors.length === 0) {
         return current; // clean — ready for solver
       }
+
+      // Detect oscillation: if we've seen these exact errors before, bail out
+      const errorKey = lint.errors.sort().join("|");
+      if (seenErrors.has(errorKey)) {
+        return current; // LLM is repeating itself — let the solver try
+      }
+      seenErrors.add(errorKey);
 
       // Ask LLM to fix the remaining errors
       const errorReport = [
