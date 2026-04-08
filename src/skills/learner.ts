@@ -88,7 +88,10 @@ Extract a reusable template from this verified solution.`,
       signature: parsed.signature,
       skeleton: parsed.skeleton,
       slots: (parsed.slots as SlotDef[]).filter(
-        (s) => typeof s.name === "string" && typeof s.description === "string",
+        (s) =>
+          typeof s.name === "string" &&
+          typeof s.description === "string" &&
+          typeof s.format === "string",
       ),
       normalizations: (parsed.normalizations as Normalization[]).filter(
         (n) => typeof n.source === "string" && typeof n.transform === "string",

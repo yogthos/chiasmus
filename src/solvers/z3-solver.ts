@@ -52,10 +52,12 @@ export async function createZ3Solver(): Promise<Solver> {
       let checkResult: string;
       try {
         const check = solver.check();
-        const timeout = new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error("solver timed out")), SOLVER_TIMEOUT_MS)
-        );
+        let timer: ReturnType<typeof setTimeout>;
+        const timeout = new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error("solver timed out")), SOLVER_TIMEOUT_MS);
+        });
         checkResult = await Promise.race([check, timeout]);
+        clearTimeout(timer!);
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : String(e);
         return { status: "error", error: msg };

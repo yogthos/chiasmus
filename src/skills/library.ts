@@ -135,8 +135,12 @@ export class SkillLibrary {
     return this.loadMetadata(name);
   }
 
-  /** Add a learned (candidate) template to the library */
-  addLearned(template: SkillTemplate): void {
+  /** Add a learned (candidate) template to the library. Returns false if name already exists. */
+  addLearned(template: SkillTemplate): boolean {
+    if (this.templates.has(template.name)) {
+      return false; // don't overwrite existing templates
+    }
+
     this.templates.set(template.name, template);
 
     this.db
@@ -148,6 +152,7 @@ export class SkillLibrary {
       .run(template.name);
 
     this.rebuildSearchIndex();
+    return true;
   }
 
   /** Promote a candidate template to full status */

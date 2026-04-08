@@ -300,12 +300,12 @@ async function handleFormalize(
   formalizer: FormalizationEngine,
   args: Record<string, unknown>,
 ): Promise<CallToolResult> {
-  const problem = args.problem as string;
-  if (!problem) {
+  if (typeof args.problem !== "string" || !args.problem) {
     return {
-      content: [{ type: "text", text: JSON.stringify({ error: "The 'problem' parameter is required" }) }],
+      content: [{ type: "text", text: JSON.stringify({ error: "The 'problem' parameter (string) is required" }) }],
     };
   }
+  const problem = args.problem;
 
   const result = await formalizer.formalize(problem);
   return {
@@ -326,12 +326,12 @@ async function handleSolve(
   library: SkillLibrary,
   args: Record<string, unknown>,
 ): Promise<CallToolResult> {
-  const problem = args.problem as string;
-  if (!problem) {
+  if (typeof args.problem !== "string" || !args.problem) {
     return {
-      content: [{ type: "text", text: JSON.stringify({ error: "The 'problem' parameter is required" }) }],
+      content: [{ type: "text", text: JSON.stringify({ error: "The 'problem' parameter (string) is required" }) }],
     };
   }
+  const problem = args.problem;
 
   // If no LLM configured, fall back to formalize
   if (!formalizer) {
@@ -385,17 +385,22 @@ async function handleLearn(
     };
   }
 
-  const solver = args.solver as string;
-  const spec = args.spec as string;
-  const problem = args.problem as string;
-
-  if (!solver || !spec || !problem) {
+  if (
+    typeof args.solver !== "string" ||
+    typeof args.spec !== "string" ||
+    typeof args.problem !== "string" ||
+    !args.solver || !args.spec || !args.problem
+  ) {
     return {
       content: [{ type: "text", text: JSON.stringify({
-        error: "Required parameters: solver, spec, problem",
+        error: "Required parameters: solver (string), spec (string), problem (string)",
       }) }],
     };
   }
+
+  const solver = args.solver;
+  const spec = args.spec;
+  const problem = args.problem;
 
   if (solver !== "z3" && solver !== "prolog") {
     return {
