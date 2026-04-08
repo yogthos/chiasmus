@@ -1,6 +1,6 @@
 # Chiasmus
 
-MCP server that gives LLMs access to formal verification via Z3 (SMT solver) and Tau Prolog. Translates natural language problems into formal logic using a template-based pipeline, verifies results with mathematical certainty.
+MCP server that gives LLMs access to formal verification via Z3 (SMT solver) and Tau Prolog, plus tree-sitter-based source code analysis. Translates natural language problems into formal logic using a template-based pipeline, verifies results with mathematical certainty, and analyzes call graphs for reachability, dead code, and impact analysis.
 
 ### Example use cases
 
@@ -9,6 +9,8 @@ MCP server that gives LLMs access to formal verification via Z3 (SMT solver) and
 - **"Can user input reach the database?"** → Prolog traces all paths through the call graph, flags taint flows to sensitive sinks
 - **"Are our frontend and backend validations consistent?"** → Z3 finds concrete inputs that pass one but fail the other (e.g. age=15 passes frontend min=13 but fails backend min=18)
 - **"Does our workflow have dead-end or unreachable states?"** → Prolog checks reachability from the initial state, identifies orphaned and terminal nodes
+- **"What's the dead code in this module?"** → tree-sitter parses source files, Prolog finds functions unreachable from any entry point
+- **"What breaks if I change this function?"** → call graph impact analysis shows all transitive callers
 
 ## Setup
 
@@ -68,33 +70,65 @@ Add to `opencode.json`:
 
 ## Tools
 
-**`chiasmus_verify`** — Submit raw SMT-LIB or Prolog, get a verified result.
+**`chiasmus_verify`** — Submit raw SMT-LIB or Prolog, get a verified result. Z3 UNSAT results include an `unsatCore` showing which assertions conflict. Prolog supports `explain=true` for derivation traces showing which rules fired.
 
 ```
 chiasmus_verify solver="z3" input="
   (declare-const x Int)
-  (declare-const y Int)
-  (assert (= (+ x y) 10))
-  (assert (> x 0))
-  (assert (> y 0))
+  (assert (! (> x 10) :named gt10))
+  (assert (! (< x 5) :named lt5))
 "
-→ { status: "sat", model: { x: "7", y: "3" } }
+→ { status: "unsat", unsatCore: ["gt10", "lt5"] }
 ```
 
 ```
 chiasmus_verify solver="prolog"
   input="parent(tom, bob). parent(bob, ann). ancestor(X,Y) :- parent(X,Y). ancestor(X,Y) :- parent(X,Z), ancestor(Z,Y)."
   query="ancestor(tom, Who)."
-→ { status: "success", answers: [{ bindings: { Who: "bob" } }, { bindings: { Who: "ann" } }] }
+  explain=true
+→ { status: "success", answers: [...], trace: ["ancestor(tom,bob)", "ancestor(bob,ann)", "ancestor(tom,ann)"] }
 ```
 
-**`chiasmus_skills`** — Search the template library. Ships with 8 starter templates covering authorization, configuration, dependency resolution, validation, rule inference, and graph reachability.
+**`chiasmus_graph`** — Analyze source code call graphs via tree-sitter + Prolog. Parses TS/JS files, extracts cross-module call graphs, runs formal analyses.
 
-**`chiasmus_formalize`** — Find the best template for a problem, get slot-filling instructions. Fill the slots using your context, then call `chiasmus_verify`.
+```
+chiasmus_graph files=["src/server.ts", "src/db.ts"] analysis="callers" target="query"
+→ { analysis: "callers", result: ["handleRequest"] }
 
-**`chiasmus_solve`** — End-to-end: selects template, fills slots via LLM, runs lint and correction loops, returns a verified result. Optional — the same result is achieved by using `chiasmus_formalize` → fill slots → `chiasmus_verify`, which is the recommended workflow since the calling LLM has full conversation context.
+chiasmus_graph files=["src/**/*.ts"] analysis="dead-code"
+→ { analysis: "dead-code", result: ["unusedHelper", "legacyParser"] }
+
+chiasmus_graph files=["src/**/*.ts"] analysis="reachability" from="handleRequest" to="dbQuery"
+→ { analysis: "reachability", result: { reachable: true } }
+
+chiasmus_graph files=["src/**/*.ts"] analysis="impact" target="validate"
+→ { analysis: "impact", result: ["handleRequest", "main"] }
+```
+
+Analyses: `summary`, `callers`, `callees`, `reachability`, `dead-code`, `cycles`, `path`, `impact`, `facts`.
+
+**`chiasmus_skills`** — Search the template library. Ships with 8 starter templates covering authorization, configuration, dependency resolution, validation, rule inference, and graph reachability. By-name lookups include related template suggestions.
+
+**`chiasmus_formalize`** — Find the best template for a problem, get slot-filling instructions plus suggestions for related verification checks. Fill the slots using your context, then call `chiasmus_verify`.
+
+**`chiasmus_solve`** — End-to-end: selects template, fills slots via LLM, runs lint and correction loops with enriched feedback (unsat cores, structured error classification), returns a verified result. Optional — the same result is achieved by using `chiasmus_formalize` → fill slots → `chiasmus_verify`, which is the recommended workflow since the calling LLM has full conversation context.
+
+**`chiasmus_craft`** — Create a new template and add it to the skill library. The calling LLM designs the template — no API key needed. Describe a problem type, then submit a skeleton with `{{SLOT:name}}` markers, slot definitions, and normalization recipes. Validates slot/skeleton consistency and name uniqueness. Optionally tests the example through the solver.
+
+```
+chiasmus_craft name="api-rate-limit" domain="configuration" solver="z3"
+  signature="Check if rate limit configs across services are consistent"
+  skeleton="{{SLOT:declarations}}\n(assert (not (= {{SLOT:limit_a}} {{SLOT:limit_b}})))"
+  slots=[{name: "declarations", ...}, {name: "limit_a", ...}, {name: "limit_b", ...}]
+  normalizations=[{source: "YAML config", transform: "Map rate limits to Int constants"}]
+→ { created: true, template: "api-rate-limit", slots: 3 }
+```
+
+After creation, the template appears in `chiasmus_skills` searches and `chiasmus_formalize`.
 
 **`chiasmus_learn`** — Extract a reusable template from a verified solution. Candidates get promoted after 3+ successful reuses.
+
+**`chiasmus_lint`** — Fast structural validation of specs without running the solver.
 
 ## Recommended Workflow
 
@@ -113,6 +147,50 @@ Use a solver when the LLM alone can't guarantee correctness:
 - **"Do these rules ever conflict?"** — contradiction detection over combinatorial spaces
 - **"Can X reach Y through any path?"** — transitive closure / reachability
 - **Access control, configs, dependencies** — where correctness is non-negotiable
+
+Use `chiasmus_graph` when you need structural reasoning about code:
+
+- **"What calls this function?"** — impact analysis before refactoring
+- **"What's dead code?"** — find functions unreachable from entry points
+- **"Can user input reach this SQL query?"** — taint analysis via call graph reachability
+- **"What breaks if I change X?"** — blast radius via reverse reachability
+- **"Are there circular dependencies?"** — cycle detection in call graphs
+
+## Why `chiasmus_graph` over grep
+
+When an LLM needs to understand code structure, it typically greps for function names and manually traces call chains. This works for direct references but breaks down for transitive questions. Here's a real comparison using chiasmus's own codebase:
+
+**Question: "What's the blast radius of changing `lintSpec`?"**
+
+With grep, this takes multiple rounds — first find direct callers, then callers of those callers, reconstructing the chain manually:
+
+```
+grep lintSpec src/**/*.ts     → found in engine.ts (lintLoop) and mcp-server.ts (handleLint)
+grep lintLoop src/**/*.ts     → called from solve() at lines 75 and 87
+grep handleSolve src/**/*.ts  → called from createChiasmusServer switch...
+```
+
+Three rounds of grep, manual reasoning at each step, and you've still only traced part of the chain. With `chiasmus_graph`, one call gives the complete transitive answer:
+
+```
+chiasmus_graph analysis="impact" target="lintSpec"
+→ ["lintLoop", "handleLint", "solve", "correctionLoop",
+   "handleVerify", "handleSolve", "handleGraph",
+   "createChiasmusServer", "runAnalysis", "runAnalysisFromGraph"]
+```
+
+10 affected functions found in a single call — including paths through `correctionLoop` and `runAnalysis` that the grep approach missed entirely.
+
+The same applies to other structural questions:
+
+| Question | Grep | chiasmus_graph |
+|----------|------|----------------|
+| Impact of changing X | Multiple greps + manual trace; misses transitive paths | 1 call, complete transitive chain |
+| Dead code detection | Grep every function name against all call sites — impractical | 1 call, definitive answer |
+| Can A reach B? | Manually reconstruct call chain across files | 1 call, true/false |
+| Call chain A→B | Multiple greps, mentally reconstruct path | 1 call, exact chain e.g. `[handleSolve,solve,lintLoop,lintSpec]` |
+
+The key difference: grep finds string matches, `chiasmus_graph` answers structural questions. Transitive reachability, dead code, and impact analysis are formally impossible with grep alone.
 
 ## Configuration
 

@@ -17,6 +17,10 @@ import { lintSpec } from "./formalize/validate.js";
 import { createLLMFromEnv } from "./llm/anthropic.js";
 import type { LLMAdapter } from "./llm/types.js";
 import type { SolverResult } from "./solvers/types.js";
+import { runAnalysis } from "./graph/analyses.js";
+import type { AnalysisType } from "./graph/analyses.js";
+import { craftTemplate } from "./skills/craft.js";
+import type { CraftInput } from "./skills/craft.js";
 
 export function getChiasmusHome(): string {
   return process.env.CHIASMUS_HOME ?? join(homedir(), ".chiasmus");
@@ -197,6 +201,133 @@ Returns cleaned spec + fixes applied + remaining errors.`,
         },
       },
       required: ["solver", "input"],
+    },
+  },
+  {
+    name: "chiasmus_graph",
+    description: `Analyze source code call graphs via tree-sitter + Prolog.
+
+Parse source files → extract call graph → run formal analysis.
+Supports: TypeScript, JavaScript. Files must be absolute paths.
+
+ANALYSES:
+  summary      — overview: files, functions, call edges
+  callers      — who calls target? (needs target)
+  callees      — what does target call? (needs target)
+  reachability — can from reach to? (needs from, to)
+  dead-code    — functions unreachable from entry points
+  cycles       — circular call dependencies
+  path         — call chain from→to (needs from, to)
+  impact       — what breaks if target changes? (needs target)
+  facts        — raw Prolog facts for custom queries via chiasmus_verify`,
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        files: {
+          type: "array",
+          items: { type: "string" },
+          description: "Absolute file paths to analyze",
+        },
+        analysis: {
+          type: "string",
+          enum: ["summary", "callers", "callees", "reachability", "dead-code", "cycles", "path", "impact", "facts"],
+          description: "Which analysis to run",
+        },
+        target: {
+          type: "string",
+          description: "Target function name (for callers, callees, impact)",
+        },
+        from: {
+          type: "string",
+          description: "Source function (for reachability, path)",
+        },
+        to: {
+          type: "string",
+          description: "Destination function (for reachability, path)",
+        },
+        entry_points: {
+          type: "array",
+          items: { type: "string" },
+          description: "Entry point function names for dead-code analysis (auto-detects exports if omitted)",
+        },
+      },
+      required: ["files", "analysis"],
+    },
+  },
+  {
+    name: "chiasmus_craft",
+    description: `Create a new formalization template and add it to the skill library.
+
+The calling LLM designs the template — no API key needed. Describe your problem, then submit a template with a skeleton (formal spec with {{SLOT:name}} markers), slot definitions, and normalization recipes.
+
+After creation, the template appears in chiasmus_skills and chiasmus_formalize.
+
+Validation: checks slot/skeleton consistency, required fields, name uniqueness.
+Optional: set test=true with an example to run it through the solver.`,
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        name: {
+          type: "string",
+          description: "Kebab-case unique identifier (e.g. 'api-rate-limit-check')",
+        },
+        domain: {
+          type: "string",
+          description: "Problem domain (authorization, configuration, dependency, validation, rules, analysis, or custom)",
+        },
+        solver: {
+          type: "string",
+          enum: ["z3", "prolog"],
+          description: "Target solver",
+        },
+        signature: {
+          type: "string",
+          description: "Natural language description for search/matching",
+        },
+        skeleton: {
+          type: "string",
+          description: "Formal spec template with {{SLOT:name}} markers",
+        },
+        slots: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              name: { type: "string" },
+              description: { type: "string" },
+              format: { type: "string" },
+            },
+            required: ["name", "description", "format"],
+          },
+          description: "Slot definitions — each must match a {{SLOT:name}} in skeleton",
+        },
+        normalizations: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              source: { type: "string" },
+              transform: { type: "string" },
+            },
+            required: ["source", "transform"],
+          },
+          description: "Recipes for mapping domain inputs to slot values",
+        },
+        tips: {
+          type: "array",
+          items: { type: "string" },
+          description: "Optional solver-specific tips and pitfalls",
+        },
+        example: {
+          type: "string",
+          description: "Optional complete worked example with all slots filled",
+        },
+        test: {
+          type: "boolean",
+          description: "If true and example provided, run example through solver to validate (default: false)",
+        },
+      },
+      required: ["name", "domain", "solver", "signature", "skeleton", "slots", "normalizations"],
     },
   },
 ];
@@ -497,6 +628,70 @@ function handleLint(args: Record<string, unknown>): CallToolResult {
   };
 }
 
+const VALID_ANALYSES = ["summary", "callers", "callees", "reachability", "dead-code", "cycles", "path", "impact", "facts"];
+
+async function handleGraph(args: Record<string, unknown>): Promise<CallToolResult> {
+  const files = args.files;
+  const analysis = args.analysis;
+
+  if (!Array.isArray(files) || typeof analysis !== "string") {
+    return {
+      content: [{ type: "text", text: JSON.stringify({
+        error: "Required: files (string[]), analysis (string)",
+      }) }],
+    };
+  }
+
+  if (!VALID_ANALYSES.includes(analysis)) {
+    return {
+      content: [{ type: "text", text: JSON.stringify({
+        error: `Unknown analysis: ${analysis}. Use one of: ${VALID_ANALYSES.join(", ")}`,
+      }) }],
+    };
+  }
+
+  try {
+    const result = await runAnalysis(files as string[], {
+      analysis: analysis as AnalysisType,
+      target: args.target as string | undefined,
+      from: args.from as string | undefined,
+      to: args.to as string | undefined,
+      entryPoints: args.entry_points as string[] | undefined,
+    });
+    return {
+      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+    };
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return {
+      content: [{ type: "text", text: JSON.stringify({ error: msg }) }],
+    };
+  }
+}
+
+async function handleCraft(
+  library: SkillLibrary,
+  args: Record<string, unknown>,
+): Promise<CallToolResult> {
+  const input: CraftInput = {
+    name: args.name as string ?? "",
+    domain: args.domain as string ?? "",
+    solver: args.solver as string ?? "",
+    signature: args.signature as string ?? "",
+    skeleton: args.skeleton as string ?? "",
+    slots: args.slots as Array<{ name: string; description: string; format: string }> ?? [],
+    normalizations: args.normalizations as Array<{ source: string; transform: string }> ?? [],
+    tips: args.tips as string[] | undefined,
+    example: args.example as string | undefined,
+    test: args.test as boolean | undefined,
+  };
+
+  const result = await craftTemplate(input, library);
+  return {
+    content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+  };
+}
+
 export async function createChiasmusServer(
   chiasmusHome?: string,
   llmOverride?: LLMAdapter | null,
@@ -539,6 +734,10 @@ export async function createChiasmusServer(
         return handleLearn(learner, args ?? {});
       case "chiasmus_lint":
         return handleLint(args ?? {});
+      case "chiasmus_graph":
+        return handleGraph(args ?? {});
+      case "chiasmus_craft":
+        return handleCraft(library, args ?? {});
       default:
         return {
           content: [
