@@ -404,6 +404,71 @@ describe("Chiasmus MCP Server", () => {
     });
   });
 
+  describe("chiasmus_craft", () => {
+    it("appears in tool list", async () => {
+      const tools = await client.listTools();
+      const names = tools.tools.map((t) => t.name);
+      expect(names).toContain("chiasmus_craft");
+    });
+
+    it("creates a template via MCP", async () => {
+      const result = await client.callTool({
+        name: "chiasmus_craft",
+        arguments: {
+          name: "mcp-test-template",
+          domain: "validation",
+          solver: "z3",
+          signature: "Test template created via MCP",
+          skeleton: "(declare-const x Int)\n(assert {{SLOT:condition}})",
+          slots: [
+            { name: "condition", description: "Test condition", format: "(> x 0)" },
+          ],
+          normalizations: [
+            { source: "test input", transform: "Map to SMT expression" },
+          ],
+        },
+      });
+
+      const content = result.content as Array<{ type: string; text: string }>;
+      const parsed = JSON.parse(content[0].text);
+      expect(parsed.created).toBe(true);
+      expect(parsed.template).toBe("mcp-test-template");
+    });
+
+    it("created template appears in chiasmus_skills search", async () => {
+      const result = await client.callTool({
+        name: "chiasmus_skills",
+        arguments: {
+          query: "Test template created via MCP",
+        },
+      });
+
+      const content = result.content as Array<{ type: string; text: string }>;
+      const parsed = JSON.parse(content[0].text);
+      expect(parsed.some((s: any) => s.template.name === "mcp-test-template")).toBe(true);
+    });
+
+    it("returns validation errors for bad input", async () => {
+      const result = await client.callTool({
+        name: "chiasmus_craft",
+        arguments: {
+          name: "",
+          domain: "test",
+          solver: "invalid",
+          signature: "",
+          skeleton: "",
+          slots: [],
+          normalizations: [],
+        },
+      });
+
+      const content = result.content as Array<{ type: string; text: string }>;
+      const parsed = JSON.parse(content[0].text);
+      expect(parsed.created).toBe(false);
+      expect(parsed.errors.length).toBeGreaterThan(0);
+    });
+  });
+
   describe("chiasmus_lint", () => {
     it("lists chiasmus_lint in available tools", async () => {
       const tools = await client.listTools();
