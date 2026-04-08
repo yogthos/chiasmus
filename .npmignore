@@ -1,0 +1,47 @@
+# Source files (dist is published)
+src/
+tests/
+
+# Config files
+tsconfig.json
+vitest.config.ts
+
+# Development
+*.tsbuildinfo
+coverage/
+
+# Documentation (except README)
+architecture.md
+*.md
+!README.md
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# npm
+node_modules/
+*.tgz
+package-lock.json
+
+# Environment
+.env
+.env.*
+
+# Claude
+.claude/
+.mcp.json
+
+# Reference projects
+Matryoshka/
+Ori-Mnemos/

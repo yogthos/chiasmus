@@ -3,13 +3,41 @@
   "version": "0.1.0",
   "type": "module",
   "description": "Neurosymbolic verification engine - MCP server for formal reasoning with Z3 and Tau Prolog",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
+  "main": "dist/mcp-server.js",
+  "types": "dist/mcp-server.d.ts",
   "bin": {
     "chiasmus": "dist/mcp-server.js"
   },
+  "exports": {
+    ".": {
+      "types": "./dist/mcp-server.d.ts",
+      "default": "./dist/mcp-server.js"
+    },
+    "./solvers": {
+      "types": "./dist/solvers/types.d.ts",
+      "default": "./dist/solvers/types.js"
+    },
+    "./skills": {
+      "types": "./dist/skills/types.d.ts",
+      "default": "./dist/skills/types.js"
+    },
+    "./formalize": {
+      "types": "./dist/formalize/engine.d.ts",
+      "default": "./dist/formalize/engine.js"
+    },
+    "./llm": {
+      "types": "./dist/llm/types.d.ts",
+      "default": "./dist/llm/types.js"
+    }
+  },
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "tsc",
+    "prepublishOnly": "npm run build",
     "test": "vitest",
     "test:run": "vitest run",
     "test:coverage": "vitest run --coverage",
@@ -23,10 +51,21 @@
     "formal-verification",
     "neurosymbolic",
     "smt",
-    "solver"
+    "solver",
+    "model-context-protocol",
+    "claude",
+    "llm"
   ],
-  "license": "MIT",
+  "license": "Apache-2.0",
   "author": "yogthos",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yogthos/chiasmus.git"
+  },
+  "homepage": "https://github.com/yogthos/chiasmus#readme",
+  "bugs": {
+    "url": "https://github.com/yogthos/chiasmus/issues"
+  },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
     "better-sqlite3": "^12.8.0",
