@@ -1,7 +1,15 @@
+/**
+ * Correction loop for solver specs — wraps repl-sandbox's generic
+ * correctionLoop with chiasmus-specific SolverSession lifecycle.
+ */
+
+import { correctionLoop as genericCorrectionLoop } from "repl-sandbox";
+import type {
+  CorrectionResult as GenericCorrectionResult,
+  CorrectionAttempt as GenericCorrectionAttempt,
+} from "repl-sandbox";
 import type { SolverInput, SolverResult } from "./types.js";
 import { SolverSession } from "./session.js";
-
-const DEFAULT_MAX_ROUNDS = 5;
 
 /** A function that takes a broken spec + error and returns a patched spec */
 export type SpecFixer = (
@@ -12,23 +20,10 @@ export type SpecFixer = (
 ) => Promise<SolverInput | null>;
 
 /** Record of a single correction attempt */
-export interface CorrectionAttempt {
-  round: number;
-  input: SolverInput;
-  result: SolverResult;
-}
+export type CorrectionAttempt = GenericCorrectionAttempt<SolverInput, SolverResult>;
 
 /** Result of the full correction loop */
-export interface CorrectionResult {
-  /** Final solver result (may be success or the last error) */
-  result: SolverResult;
-  /** Whether the loop converged to a valid result */
-  converged: boolean;
-  /** Number of rounds taken */
-  rounds: number;
-  /** Full history of attempts */
-  history: CorrectionAttempt[];
-}
+export type CorrectionResult = GenericCorrectionResult<SolverInput, SolverResult>;
 
 export interface CorrectionLoopOptions {
   maxRounds?: number;
@@ -48,50 +43,22 @@ export async function correctionLoop(
   fixer: SpecFixer,
   options: CorrectionLoopOptions = {},
 ): Promise<CorrectionResult> {
-  const maxRounds = options.maxRounds ?? DEFAULT_MAX_ROUNDS;
-  const history: CorrectionAttempt[] = [];
-
-  let currentInput = initialInput;
-
-  for (let round = 1; round <= maxRounds; round++) {
-    const solverType = currentInput.type === "z3" ? "z3" as const : "prolog" as const;
-    const session = await SolverSession.create(solverType);
-
-    let result: SolverResult;
-    try {
-      result = await session.solve(currentInput);
-    } finally {
-      session.dispose();
-    }
-
-    history.push({ round, input: currentInput, result });
-
-    // Non-error results mean the solver accepted the spec
-    if (result.status !== "error") {
-      return { result, converged: true, rounds: round, history };
-    }
-
-    // Last round — don't try to fix, just return
-    if (round === maxRounds) {
-      return { result, converged: false, rounds: round, history };
-    }
-
-    // Ask fixer to patch the spec
-    const patched = await fixer(currentInput, result.error, round, result);
-    if (patched === null) {
-      // Fixer gave up
-      return { result, converged: false, rounds: round, history };
-    }
-
-    currentInput = patched;
-  }
-
-  // Should not reach here, but satisfy TypeScript
-  const lastAttempt = history[history.length - 1];
-  return {
-    result: lastAttempt.result,
-    converged: false,
-    rounds: history.length,
-    history,
-  };
+  return genericCorrectionLoop<SolverInput, SolverResult>(
+    initialInput,
+    // submit: create a solver session, run, dispose
+    async (input) => {
+      const solverType = input.type === "z3" ? "z3" as const : "prolog" as const;
+      const session = await SolverSession.create(solverType);
+      try {
+        return await session.solve(input);
+      } finally {
+        session.dispose();
+      }
+    },
+    // isError: check if result is a solver error
+    (result) => (result.status === "error" ? result.error : null),
+    // fixer: delegate to caller's fixer
+    fixer,
+    options,
+  );
 }
