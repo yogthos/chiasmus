@@ -220,7 +220,7 @@ Returns cleaned spec + fixes applied + remaining errors.`,
     description: `Analyze source code call graphs via tree-sitter + Prolog.
 
 Parse source files → extract call graph → run formal analysis.
-Supports: TypeScript, JavaScript. Files must be absolute paths.
+Supports: TypeScript, JavaScript, Python, Go, Clojure. Files must be absolute paths.
 
 ANALYSES:
   summary      — overview: files, functions, call edges
