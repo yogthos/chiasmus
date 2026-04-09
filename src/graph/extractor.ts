@@ -1,4 +1,5 @@
 import { parseSource, parseSourceAsync, getLanguageForFile } from "./parser.js";
+import { getAdapter } from "./adapter-registry.js";
 import type { CodeGraph, DefinesFact, CallsFact, ImportsFact, ExportsFact, ContainsFact } from "./types.js";
 
 /** Extract a unified call graph from multiple source files */
@@ -20,7 +21,19 @@ export async function extractGraph(files: Array<{ path: string; content: string 
       ?? await parseSourceAsync(file.content, file.path);
     if (!tree) continue;
 
-    if (lang === "clojure") {
+    // Check for a registered adapter first
+    const adapter = getAdapter(lang);
+    if (adapter) {
+      const partial = adapter.extract(tree.rootNode, file.path);
+      for (const d of partial.defines) defines.push(d);
+      for (const c of partial.calls) {
+        const key = `${c.caller}->${c.callee}`;
+        if (!callSet.has(key)) { callSet.add(key); calls.push(c); }
+      }
+      for (const i of partial.imports) imports.push(i);
+      for (const e of partial.exports) exports.push(e);
+      for (const c of partial.contains ?? []) contains.push(c);
+    } else if (lang === "clojure") {
       walkClojure(tree.rootNode, file.path, defines, calls, imports, exports, callSet);
     } else if (lang === "python") {
       const scopeStack: string[] = [];

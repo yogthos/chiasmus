@@ -1,5 +1,6 @@
 import { createRequire } from "node:module";
 import { extname, resolve, dirname } from "node:path";
+import { getAdapter, getAdapterForExt, getAdapterExtensions } from "./adapter-registry.js";
 
 const require = createRequire(import.meta.url);
 
@@ -59,11 +60,23 @@ async function initWasm(): Promise<void> {
   }
 }
 
+function getLangConfig(language: string): LangConfig | null {
+  const builtin = LANGUAGE_CONFIG[language];
+  if (builtin) return builtin;
+
+  const adapter = getAdapter(language);
+  if (!adapter) return null;
+  const g = adapter.grammar;
+  return g.wasm
+    ? { package: g.package, wasm: true, wasmFile: g.wasmFile }
+    : { package: g.package, moduleExport: g.moduleExport };
+}
+
 function loadLanguageSync(language: string): { lang: any; wasm: boolean } | null {
   const cached = languageCache.get(language);
   if (cached && !cached.wasm) return cached;
 
-  const config = LANGUAGE_CONFIG[language];
+  const config = getLangConfig(language);
   if (!config || config.wasm) return null;
 
   try {
@@ -83,7 +96,7 @@ async function loadLanguageAsync(language: string): Promise<{ lang: any; wasm: b
   const cached = languageCache.get(language);
   if (cached) return cached;
 
-  const config = LANGUAGE_CONFIG[language];
+  const config = getLangConfig(language);
   if (!config) return null;
 
   try {
@@ -112,12 +125,13 @@ async function loadLanguageAsync(language: string): Promise<{ lang: any; wasm: b
 /** Get the tree-sitter language name for a file path */
 export function getLanguageForFile(filePath: string): string | null {
   const ext = extname(filePath).toLowerCase();
-  return EXT_MAP[ext] ?? null;
+  // Check built-in first, then registered adapters
+  return EXT_MAP[ext] ?? getAdapterForExt(ext)?.language ?? null;
 }
 
 /** Get all supported file extensions */
 export function getSupportedExtensions(): string[] {
-  return Object.keys(EXT_MAP);
+  return [...Object.keys(EXT_MAP), ...getAdapterExtensions()];
 }
 
 /** Parse source code (sync — CJS grammars only). Returns null for WASM grammars. */

@@ -28,6 +28,10 @@
     "./llm": {
       "types": "./dist/llm/types.d.ts",
       "default": "./dist/llm/types.js"
+    },
+    "./adapter": {
+      "types": "./dist/graph/types.d.ts",
+      "default": "./dist/graph/adapter-registry.js"
     }
   },
   "files": [
