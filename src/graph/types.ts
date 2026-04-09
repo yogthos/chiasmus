@@ -35,3 +35,19 @@ export interface CodeGraph {
   exports: ExportsFact[];
   contains: ContainsFact[];
 }
+
+/** User-provided language adapter for custom tree-sitter grammars */
+export interface LanguageAdapter {
+  /** Language identifier, e.g., "rust" */
+  language: string;
+  /** File extensions this adapter handles, e.g., [".rs"] */
+  extensions: string[];
+  /** Tree-sitter grammar configuration */
+  grammar:
+    | { package: string; moduleExport?: string; wasm?: false }
+    | { package: string; wasmFile: string; wasm: true };
+  /** Extract code graph facts from a parsed AST root node */
+  extract(rootNode: any, filePath: string): CodeGraph;
+  /** Optional: additional directories to scan for more adapter modules */
+  searchPaths?: string[];
+}

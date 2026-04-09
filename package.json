@@ -28,6 +28,10 @@
     "./llm": {
       "types": "./dist/llm/types.d.ts",
       "default": "./dist/llm/types.js"
+    },
+    "./adapter": {
+      "types": "./dist/graph/types.d.ts",
+      "default": "./dist/graph/adapter-registry.js"
     }
   },
   "files": [
@@ -73,7 +77,9 @@
     "repl-sandbox": "^0.1.1",
     "tau-prolog": "^0.3.4",
     "tree-sitter": "^0.21.1",
+    "tree-sitter-go": "^0.23.2",
     "tree-sitter-javascript": "^0.23.1",
+    "tree-sitter-python": "^0.23.2",
     "tree-sitter-typescript": "^0.23.2",
     "web-tree-sitter": "^0.26.8",
     "z3-solver": "^4.16.0"
