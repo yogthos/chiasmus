@@ -22,6 +22,11 @@ export async function extractGraph(files: Array<{ path: string; content: string 
 
     if (lang === "clojure") {
       walkClojure(tree.rootNode, file.path, defines, calls, imports, exports, callSet);
+    } else if (lang === "python") {
+      const scopeStack: string[] = [];
+      walkPython(tree.rootNode, file.path, scopeStack, defines, calls, imports, exports, contains, callSet);
+    } else if (lang === "go") {
+      walkGo(tree.rootNode, file.path, defines, calls, imports, exports, contains, callSet);
     } else {
       const scopeStack: string[] = [];
       walkNode(tree.rootNode, file.path, lang, scopeStack, defines, calls, imports, exports, contains, callSet);
@@ -300,6 +305,342 @@ function extractStringContent(node: any): string | null {
     return text.slice(1, -1);
   }
   return text;
+}
+
+// ── Python extraction ───────────────────────────────────────────────
+
+function walkPython(
+  node: any,
+  filePath: string,
+  scopeStack: string[],
+  defines: DefinesFact[],
+  calls: CallsFact[],
+  imports: ImportsFact[],
+  exports: ExportsFact[],
+  contains: ContainsFact[],
+  callSet: Set<string>,
+): void {
+  const type: string = node.type;
+
+  switch (type) {
+    case "function_definition": {
+      const name = node.childForFieldName("name")?.text;
+      if (name) {
+        const kind = findPythonEnclosingClass(node) ? "method" : "function";
+        defines.push({ file: filePath, name, kind, line: node.startPosition.row + 1 });
+        const enclosingClass = findPythonEnclosingClass(node);
+        if (enclosingClass) {
+          contains.push({ parent: enclosingClass, child: name });
+        }
+        scopeStack.push(name);
+        walkPythonChildren(node, filePath, scopeStack, defines, calls, imports, exports, contains, callSet);
+        scopeStack.pop();
+        return;
+      }
+      break;
+    }
+
+    case "class_definition": {
+      const name = node.childForFieldName("name")?.text;
+      if (name) {
+        defines.push({ file: filePath, name, kind: "class", line: node.startPosition.row + 1 });
+        scopeStack.push(name);
+        walkPythonChildren(node, filePath, scopeStack, defines, calls, imports, exports, contains, callSet);
+        scopeStack.pop();
+        return;
+      }
+      break;
+    }
+
+    case "decorated_definition": {
+      // Walk into the actual definition inside the decorator
+      break;
+    }
+
+    case "call": {
+      const callee = resolvePythonCallee(node);
+      const caller = scopeStack.length > 0 ? scopeStack[scopeStack.length - 1] : null;
+      if (callee && caller) {
+        const key = `${caller}->${callee}`;
+        if (!callSet.has(key)) {
+          callSet.add(key);
+          calls.push({ caller, callee });
+        }
+      }
+      break;
+    }
+
+    case "import_statement": {
+      // import os, sys
+      for (let i = 0; i < node.childCount; i++) {
+        const child = node.child(i);
+        if (child.type === "dotted_name") {
+          imports.push({ file: filePath, name: child.text, source: child.text });
+        }
+        if (child.type === "aliased_import") {
+          const dotted = child.childForFieldName("name");
+          if (dotted) {
+            const alias = child.childForFieldName("alias")?.text ?? dotted.text;
+            imports.push({ file: filePath, name: alias, source: dotted.text });
+          }
+        }
+      }
+      return;
+    }
+
+    case "import_from_statement": {
+      // from pathlib import Path
+      const moduleNode = node.childForFieldName("module_name");
+      const source = moduleNode?.text ?? "";
+      const nameNode = node.childForFieldName("name");
+      if (nameNode) {
+        // Could be a single dotted_name or multiple via import list
+        if (nameNode.type === "dotted_name" || nameNode.type === "identifier") {
+          imports.push({ file: filePath, name: nameNode.text, source });
+        }
+      }
+      // Handle multiple imports: from x import a, b, c
+      for (let i = 0; i < node.childCount; i++) {
+        const child = node.child(i);
+        if (child.type === "dotted_name" && child !== moduleNode && child !== nameNode) {
+          imports.push({ file: filePath, name: child.text, source });
+        }
+        if (child.type === "aliased_import") {
+          const importName = child.childForFieldName("name");
+          const alias = child.childForFieldName("alias");
+          if (importName) {
+            imports.push({ file: filePath, name: alias?.text ?? importName.text, source });
+          }
+        }
+      }
+      return;
+    }
+  }
+
+  walkPythonChildren(node, filePath, scopeStack, defines, calls, imports, exports, contains, callSet);
+}
+
+function walkPythonChildren(
+  node: any,
+  filePath: string,
+  scopeStack: string[],
+  defines: DefinesFact[],
+  calls: CallsFact[],
+  imports: ImportsFact[],
+  exports: ExportsFact[],
+  contains: ContainsFact[],
+  callSet: Set<string>,
+): void {
+  for (let i = 0; i < node.childCount; i++) {
+    walkPython(node.child(i), filePath, scopeStack, defines, calls, imports, exports, contains, callSet);
+  }
+}
+
+/** Resolve callee name from a Python call node */
+function resolvePythonCallee(callNode: any): string | null {
+  const fnNode = callNode.childForFieldName("function");
+  if (!fnNode) return null;
+
+  switch (fnNode.type) {
+    case "identifier":
+      return fnNode.text;
+
+    case "attribute": {
+      // obj.method() → method
+      const attr = fnNode.childForFieldName("attribute");
+      return attr?.text ?? null;
+    }
+
+    default:
+      return fnNode.text.length <= 50 ? fnNode.text : null;
+  }
+}
+
+/** Find the enclosing class name for a Python method node */
+function findPythonEnclosingClass(node: any): string | null {
+  let current = node.parent;
+  while (current) {
+    if (current.type === "class_definition") {
+      return current.childForFieldName("name")?.text ?? null;
+    }
+    if (current.type === "block") {
+      current = current.parent;
+      continue;
+    }
+    current = current.parent;
+  }
+  return null;
+}
+
+// ── Go extraction ───────────────────────────────────────────────────
+
+function walkGo(
+  rootNode: any,
+  filePath: string,
+  defines: DefinesFact[],
+  calls: CallsFact[],
+  imports: ImportsFact[],
+  exports: ExportsFact[],
+  contains: ContainsFact[],
+  callSet: Set<string>,
+): void {
+  for (let i = 0; i < rootNode.childCount; i++) {
+    const node = rootNode.child(i);
+    const type: string = node.type;
+
+    switch (type) {
+      case "function_declaration": {
+        const name = node.childForFieldName("name")?.text;
+        if (name) {
+          defines.push({ file: filePath, name, kind: "function", line: node.startPosition.row + 1 });
+          if (/^[A-Z]/.test(name)) {
+            exports.push({ file: filePath, name });
+          }
+          extractGoCalls(node.childForFieldName("body"), name, calls, callSet);
+        }
+        break;
+      }
+
+      case "method_declaration": {
+        const name = node.childForFieldName("name")?.text;
+        if (name) {
+          defines.push({ file: filePath, name, kind: "method", line: node.startPosition.row + 1 });
+          // Extract receiver type for contains relationship
+          const receiver = node.childForFieldName("receiver");
+          const receiverType = extractGoReceiverType(receiver);
+          if (receiverType) {
+            contains.push({ parent: receiverType, child: name });
+          }
+          if (/^[A-Z]/.test(name)) {
+            exports.push({ file: filePath, name });
+          }
+          extractGoCalls(node.childForFieldName("body"), name, calls, callSet);
+        }
+        break;
+      }
+
+      case "type_declaration": {
+        // type Foo struct { ... } or type Foo interface { ... }
+        for (let j = 0; j < node.childCount; j++) {
+          const spec = node.child(j);
+          if (spec.type === "type_spec") {
+            const name = spec.childForFieldName("name")?.text;
+            const typeNode = spec.childForFieldName("type");
+            if (name && typeNode) {
+              const kind = typeNode.type === "interface_type" ? "interface" : "class";
+              defines.push({ file: filePath, name, kind, line: node.startPosition.row + 1 });
+              if (/^[A-Z]/.test(name)) {
+                exports.push({ file: filePath, name });
+              }
+            }
+          }
+        }
+        break;
+      }
+
+      case "import_declaration": {
+        for (let j = 0; j < node.childCount; j++) {
+          const child = node.child(j);
+          if (child.type === "import_spec_list") {
+            for (let k = 0; k < child.childCount; k++) {
+              const spec = child.child(k);
+              if (spec.type === "import_spec") {
+                const pathNode = spec.children.find((c: any) => c.type === "interpreted_string_literal");
+                if (pathNode) {
+                  const source = pathNode.text.slice(1, -1); // strip quotes
+                  const name = source.split("/").pop() ?? source;
+                  imports.push({ file: filePath, name, source });
+                }
+              }
+            }
+          }
+          // Single import without parens
+          if (child.type === "import_spec") {
+            const pathNode = child.children.find((c: any) => c.type === "interpreted_string_literal");
+            if (pathNode) {
+              const source = pathNode.text.slice(1, -1);
+              const name = source.split("/").pop() ?? source;
+              imports.push({ file: filePath, name, source });
+            }
+          }
+        }
+        break;
+      }
+    }
+  }
+}
+
+/** Recursively extract call_expression nodes from a Go function body */
+function extractGoCalls(
+  node: any,
+  caller: string,
+  calls: CallsFact[],
+  callSet: Set<string>,
+): void {
+  if (!node) return;
+
+  for (let i = 0; i < node.childCount; i++) {
+    const child = node.child(i);
+
+    if (child.type === "call_expression") {
+      const callee = resolveGoCallee(child);
+      if (callee) {
+        const key = `${caller}->${callee}`;
+        if (!callSet.has(key)) {
+          callSet.add(key);
+          calls.push({ caller, callee });
+        }
+      }
+    }
+
+    extractGoCalls(child, caller, calls, callSet);
+  }
+}
+
+/** Resolve callee name from a Go call_expression */
+function resolveGoCallee(callNode: any): string | null {
+  const fnNode = callNode.childForFieldName("function");
+  if (!fnNode) return null;
+
+  switch (fnNode.type) {
+    case "identifier":
+      return fnNode.text;
+
+    case "selector_expression": {
+      // pkg.Func() or obj.Method() → extract the field (right side)
+      const field = fnNode.childForFieldName("field");
+      return field?.text ?? null;
+    }
+
+    default:
+      return fnNode.text.length <= 50 ? fnNode.text : null;
+  }
+}
+
+/** Extract the receiver type name from a Go method receiver */
+function extractGoReceiverType(receiver: any): string | null {
+  if (!receiver) return null;
+  // receiver is parameter_list: (a *Animal) or (a Animal)
+  for (let i = 0; i < receiver.childCount; i++) {
+    const param = receiver.child(i);
+    if (param.type === "parameter_declaration") {
+      const typeNode = param.childForFieldName("type");
+      if (!typeNode) continue;
+      // Could be pointer_type (*Animal) or type_identifier (Animal)
+      if (typeNode.type === "pointer_type") {
+        // First child after * is the type identifier
+        for (let j = 0; j < typeNode.childCount; j++) {
+          if (typeNode.child(j).type === "type_identifier") {
+            return typeNode.child(j).text;
+          }
+        }
+      }
+      if (typeNode.type === "type_identifier") {
+        return typeNode.text;
+      }
+    }
+  }
+  return null;
 }
 
 // ── Clojure extraction ──────────────────────────────────────────────

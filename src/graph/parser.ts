@@ -20,6 +20,8 @@ const LANGUAGE_CONFIG: Record<string, LangConfig> = {
   typescript: { package: "tree-sitter-typescript", moduleExport: "typescript" },
   tsx: { package: "tree-sitter-typescript", moduleExport: "tsx" },
   javascript: { package: "tree-sitter-javascript" },
+  python: { package: "tree-sitter-python" },
+  go: { package: "tree-sitter-go" },
   clojure: { package: "@yogthos/tree-sitter-clojure", wasm: true, wasmFile: "tree-sitter-clojure.wasm" },
 };
 
@@ -32,6 +34,9 @@ const EXT_MAP: Record<string, string> = {
   ".jsx": "javascript",
   ".mjs": "javascript",
   ".cjs": "javascript",
+  ".py": "python",
+  ".pyw": "python",
+  ".go": "go",
   ".clj": "clojure",
   ".cljs": "clojure",
   ".cljc": "clojure",
