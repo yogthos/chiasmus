@@ -1,6 +1,7 @@
 import { createRequire } from "node:module";
 import { readdirSync, existsSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import type { LanguageAdapter } from "./types.js";
 
 const require = createRequire(import.meta.url);
@@ -57,7 +58,7 @@ export async function discoverAdapters(): Promise<void> {
     nodeModulesDir = resolve(ownPkg, "..", "..");
   } catch {
     // Fallback: walk up from this file
-    nodeModulesDir = resolve(import.meta.url.replace("file://", ""), "..", "..", "..", "node_modules");
+    nodeModulesDir = resolve(fileURLToPath(import.meta.url), "..", "..", "..", "node_modules");
   }
 
   // Scan for chiasmus-adapter-* packages
@@ -105,7 +106,7 @@ async function scanDirectory(dir: string, prefix: string | null): Promise<void> 
         if (!entry.endsWith(".js") && !entry.endsWith(".mjs")) continue;
         const filePath = join(dir, entry);
         if (!statSync(filePath).isFile()) continue;
-        const mod = await import(filePath);
+        const mod = await import(pathToFileURL(filePath).href);
         if (mod) registerFromModule(mod);
       }
     } catch {

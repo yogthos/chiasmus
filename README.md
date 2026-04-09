@@ -103,7 +103,9 @@ chiasmus_verify solver="prolog" format="mermaid"
 → { status: "success", answers: [{}] }
 ```
 
-**`chiasmus_graph`** — Analyze source code call graphs via tree-sitter + Prolog. Parses TS/JS files, extracts cross-module call graphs, runs formal analyses.
+**`chiasmus_graph`** — Analyze source code call graphs via tree-sitter + Prolog. Parses source files, extracts cross-module call graphs, runs formal analyses.
+
+Built-in language support: **TypeScript**, **JavaScript**, **Python**, **Go**, **Clojure/ClojureScript**. Additional languages can be added via [custom adapters](#custom-language-adapters).
 
 ```
 chiasmus_graph files=["src/server.ts", "src/db.ts"] analysis="callers" target="query"
@@ -112,11 +114,11 @@ chiasmus_graph files=["src/server.ts", "src/db.ts"] analysis="callers" target="q
 chiasmus_graph files=["src/**/*.ts"] analysis="dead-code"
 → { analysis: "dead-code", result: ["unusedHelper", "legacyParser"] }
 
-chiasmus_graph files=["src/**/*.ts"] analysis="reachability" from="handleRequest" to="dbQuery"
+chiasmus_graph files=["app.py", "db.py"] analysis="reachability" from="handle" to="connect"
 → { analysis: "reachability", result: { reachable: true } }
 
-chiasmus_graph files=["src/**/*.ts"] analysis="impact" target="validate"
-→ { analysis: "impact", result: ["handleRequest", "main"] }
+chiasmus_graph files=["main.go", "handler.go"] analysis="impact" target="Query"
+→ { analysis: "impact", result: ["Handle", "main"] }
 ```
 
 Analyses: `summary`, `callers`, `callees`, `reachability`, `dead-code`, `cycles`, `path`, `impact`, `facts`.
@@ -206,11 +208,75 @@ The same applies to other structural questions:
 
 The key difference: grep finds string matches, `chiasmus_graph` answers structural questions. Transitive reachability, dead code, and impact analysis are formally impossible with grep alone.
 
+## Custom Language Adapters
+
+Add tree-sitter support for any language by publishing an npm package named `chiasmus-adapter-<language>`. Chiasmus auto-discovers these at startup.
+
+```ts
+// chiasmus-adapter-rust/index.ts
+import type { LanguageAdapter } from "chiasmus/adapter";
+
+const adapter: LanguageAdapter = {
+  language: "rust",
+  extensions: [".rs"],
+  grammar: { package: "tree-sitter-rust" },
+  extract(rootNode, filePath) {
+    const defines = [];
+    const calls = [];
+    // Walk the tree-sitter AST and populate defines, calls, imports, etc.
+    // ... your language-specific extraction logic ...
+    return { defines, calls, imports: [], exports: [], contains: [] };
+  },
+};
+
+export default adapter;
+```
+
+Install alongside chiasmus and enable adapter discovery in `~/.chiasmus/config.json`:
+
+```bash
+npm install chiasmus-adapter-rust
+```
+
+```json
+{
+  "adapterDiscovery": true
+}
+```
+
+Adapter discovery is **off by default** to keep startup fast. Enable it when you have custom adapters installed.
+
+### searchPaths
+
+An adapter can export `searchPaths` to point to directories containing additional adapter modules (`.js`/`.mjs` files). This is useful for loading adapters from non-standard locations:
+
+```ts
+export default {
+  language: "rust",
+  extensions: [".rs"],
+  grammar: { package: "tree-sitter-rust" },
+  extract(rootNode, filePath) { /* ... */ },
+  searchPaths: ["/shared/company-adapters"],
+};
+```
+
+### Adapter interface
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `language` | `string` | Language identifier (e.g., `"rust"`) |
+| `extensions` | `string[]` | File extensions (e.g., `[".rs"]`) |
+| `grammar` | `object` | Tree-sitter grammar: `{ package, moduleExport? }` for native or `{ package, wasmFile, wasm: true }` for WASM |
+| `extract` | `(rootNode, filePath) => CodeGraph` | Walks the AST and returns `{ defines, calls, imports, exports, contains }` |
+| `searchPaths` | `string[]` (optional) | Additional directories to scan for adapter modules |
+
+Built-in languages always take precedence over adapters with the same extensions.
+
 ## Configuration
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `CHIASMUS_HOME` | `~/.chiasmus/` | Database and skill storage |
+| `CHIASMUS_HOME` | `~/.chiasmus/` | Database, skill storage, and config |
 | `ANTHROPIC_API_KEY` | — | Optional: Anthropic provider for autonomous mode |
 | `DEEPSEEK_API_KEY` | — | Optional: DeepSeek provider for autonomous mode |
 | `OPENAI_API_KEY` | — | Optional: OpenAI provider for autonomous mode |
@@ -218,6 +284,12 @@ The key difference: grep finds string matches, `chiasmus_graph` answers structur
 | `CHIASMUS_MODEL` | per provider | Override model name |
 
 Providers are checked in order: Anthropic → DeepSeek → OpenAI. Only one key is needed for autonomous mode (`chiasmus_solve`, `chiasmus_learn`). When used from Claude Code, Crush, or OpenCode, no API key is needed — the calling LLM handles template filling directly.
+
+### `~/.chiasmus/config.json`
+
+| Key | Default | Purpose |
+|-----|---------|---------|
+| `adapterDiscovery` | `false` | Scan `node_modules` for `chiasmus-adapter-*` packages at startup |
 
 ## License
 

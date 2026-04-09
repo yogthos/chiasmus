@@ -10,6 +10,7 @@ import {
   type CallToolResult,
 } from "@modelcontextprotocol/sdk/types.js";
 import { discoverAdapters } from "./graph/adapter-registry.js";
+import { loadConfig } from "./config.js";
 import { SolverSession } from "./solvers/session.js";
 import { SkillLibrary } from "./skills/library.js";
 import { FormalizationEngine } from "./formalize/engine.js";
@@ -722,7 +723,10 @@ export async function createChiasmusServer(
   llmOverride?: LLMAdapter | null,
 ): Promise<{ server: Server; library: SkillLibrary; formalizer: FormalizationEngine | null }> {
   const home = chiasmusHome ?? getChiasmusHome();
-  await discoverAdapters();
+  const config = loadConfig(home);
+  if (config.adapterDiscovery) {
+    await discoverAdapters();
+  }
   const library = await SkillLibrary.create(home);
 
   // Use override if provided, otherwise try env

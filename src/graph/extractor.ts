@@ -339,9 +339,9 @@ function walkPython(
     case "function_definition": {
       const name = node.childForFieldName("name")?.text;
       if (name) {
-        const kind = findPythonEnclosingClass(node) ? "method" : "function";
-        defines.push({ file: filePath, name, kind, line: node.startPosition.row + 1 });
         const enclosingClass = findPythonEnclosingClass(node);
+        const kind = enclosingClass ? "method" : "function";
+        defines.push({ file: filePath, name, kind, line: node.startPosition.row + 1 });
         if (enclosingClass) {
           contains.push({ parent: enclosingClass, child: name });
         }
