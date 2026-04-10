@@ -6,8 +6,17 @@ export function escapeAtom(s: string): string {
   if (/^[a-z][a-z0-9_]*$/.test(s)) {
     return s;
   }
-  // Quote and escape internal single quotes
-  return `'${s.replace(/'/g, "''")}'`;
+  // Quote and escape special chars. Order matters: backslash first, then
+  // quotes, then control chars. Without backslash escaping, a trailing `\`
+  // would escape the closing quote and leave the atom unterminated.
+  const escaped = s
+    .replace(/\\/g, "\\\\")
+    .replace(/'/g, "\\'")
+    .replace(/\n/g, "\\n")
+    .replace(/\r/g, "\\r")
+    .replace(/\t/g, "\\t")
+    .replace(/\0/g, "\\0");
+  return `'${escaped}'`;
 }
 
 /** Shared list membership predicate (used by multiple rule sets) */
@@ -29,7 +38,10 @@ path(A, B, Path) :- path(A, B, [A], Path).
 path(A, B, _, [A, B]) :- calls(A, B).
 path(A, B, Visited, [A|Rest]) :- calls(A, Mid), \\+ member(Mid, Visited), path(Mid, B, [Mid|Visited], Rest).
 
-% Dead code: defined function not called by anyone and not an entry point
+% Dead code: defined function not called by anyone and not an entry point.
+% Note: only kind=function is considered — methods (kind=method) are excluded
+% because they're typically dispatched dynamically (this.foo(), obj.foo()),
+% and static call-graph extraction can't distinguish live from dead methods.
 dead(Name) :- defines(_, Name, function, _), \\+ calls(_, Name), \\+ entry_point(Name).
 
 % Convenience predicates

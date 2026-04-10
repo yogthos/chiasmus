@@ -119,21 +119,15 @@ function lintSmtlib(
 
 function lintProlog(
   spec: string,
-  fixes: string[],
+  _fixes: string[],
   errors: string[],
 ): { spec: string } {
-  let cleaned = spec;
+  const cleaned = spec;
 
-  // Auto-fix: remove ?- query line (we extract it separately)
-  // Don't report this as a fix since buildSolverInput handles it
-
-  // Strip comments and strings for structural analysis
-  const stripped = cleaned
-    .replace(/%.*$/gm, "")
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/"[^"]*"/g, '""')
-    .replace(/'[^']*'/g, "''")
-    .trim();
+  // Context-aware strip of comments and quoted literals. Naive regex
+  // stripping misparses `%` inside atoms as line comments, and `''` inside
+  // atoms as quote open/close — both cause false-positive errors.
+  const stripped = stripPrologNoise(cleaned).trim();
 
   if (!stripped) return { spec: cleaned };
 
@@ -157,4 +151,62 @@ function lintProlog(
   }
 
   return { spec: cleaned };
+}
+
+/**
+ * Remove Prolog comments and quoted literal contents without breaking inside
+ * strings/atoms. Replaces quoted literals with an empty placeholder (`''` or
+ * `""`) so paren-balance checks still work on the surrounding structure.
+ */
+function stripPrologNoise(src: string): string {
+  let out = "";
+  let i = 0;
+  const n = src.length;
+  while (i < n) {
+    const ch = src[i];
+
+    // Line comment — only outside quotes
+    if (ch === "%") {
+      while (i < n && src[i] !== "\n") i++;
+      continue;
+    }
+
+    // Block comment — only outside quotes
+    if (ch === "/" && src[i + 1] === "*") {
+      i += 2;
+      while (i < n && !(src[i] === "*" && src[i + 1] === "/")) i++;
+      i += 2;
+      continue;
+    }
+
+    // Single-quoted atom
+    if (ch === "'") {
+      i++;
+      while (i < n) {
+        if (src[i] === "\\" && i + 1 < n) { i += 2; continue; }
+        if (src[i] === "'" && src[i + 1] === "'") { i += 2; continue; }
+        if (src[i] === "'") { i++; break; }
+        i++;
+      }
+      out += "''";
+      continue;
+    }
+
+    // Double-quoted string
+    if (ch === '"') {
+      i++;
+      while (i < n) {
+        if (src[i] === "\\" && i + 1 < n) { i += 2; continue; }
+        if (src[i] === '"' && src[i + 1] === '"') { i += 2; continue; }
+        if (src[i] === '"') { i++; break; }
+        i++;
+      }
+      out += '""';
+      continue;
+    }
+
+    out += ch;
+    i++;
+  }
+  return out;
 }

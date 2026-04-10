@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { graphToProlog, escapeAtom, BUILTIN_RULES } from "../../src/graph/facts.js";
+import { graphToProlog, escapeAtom } from "../../src/graph/facts.js";
 import { extractGraph } from "../../src/graph/extractor.js";
 import { createPrologSolver } from "../../src/solvers/prolog-solver.js";
 import type { CodeGraph } from "../../src/graph/types.js";
@@ -17,7 +17,52 @@ describe("escapeAtom", () => {
   });
 
   it("escapes internal single quotes", () => {
-    expect(escapeAtom("it's")).toBe("'it''s'");
+    expect(escapeAtom("it's")).toBe("'it\\'s'");
+  });
+
+  it("escapes backslashes so trailing backslash cannot terminate the quote", async () => {
+    // A function name ending with a backslash must not corrupt the Prolog atom.
+    const escaped = escapeAtom("foo\\");
+    // Must be parseable by Tau Prolog as a single atom.
+    const program = `defines('test.ts', ${escaped}, function, 1).`;
+    const solver = createPrologSolver();
+    const result = await solver.solve({
+      type: "prolog",
+      program,
+      query: "defines(_, X, _, _).",
+    });
+    solver.dispose();
+    expect(result.status).toBe("success");
+  });
+
+  it("escapes control characters (newline, tab, carriage return)", async () => {
+    // Tree-sitter can extract text containing control chars for unusual source.
+    const ugly = "foo\nbar\tbaz\rqux";
+    const escaped = escapeAtom(ugly);
+    const program = `defines('test.ts', ${escaped}, function, 1).`;
+    const solver = createPrologSolver();
+    const result = await solver.solve({
+      type: "prolog",
+      program,
+      query: "defines(_, X, _, _).",
+    });
+    solver.dispose();
+    expect(result.status).toBe("success");
+  });
+
+  it("round-trips an atom containing a literal backslash", async () => {
+    const program = `calls(${escapeAtom("a\\b")}, ${escapeAtom("c")}).`;
+    const solver = createPrologSolver();
+    const result = await solver.solve({
+      type: "prolog",
+      program,
+      query: "calls(_, c).",
+    });
+    solver.dispose();
+    expect(result.status).toBe("success");
+    if (result.status === "success") {
+      expect(result.answers.length).toBeGreaterThan(0);
+    }
   });
 });
 

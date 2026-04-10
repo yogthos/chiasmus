@@ -2,7 +2,7 @@ import pl from "tau-prolog";
 import type { Solver, SolverInput, SolverResult, PrologAnswer } from "./types.js";
 
 const MAX_ANSWERS = 1000;
-const MAX_INFERENCES = 100_000;
+const DEFAULT_MAX_INFERENCES = 100_000;
 const MAX_TRACE_ENTRIES = 500;
 
 // Tau Prolog is callback-based; these wrap it in promises.
@@ -75,6 +75,11 @@ function instrumentForTracing(program: string): string {
       const ch = program[pos];
 
       if (inQuote) {
+        if (ch === "\\") {
+          // Backslash escape: skip the next char (covers \', \\, \n, etc.)
+          pos += 2;
+          continue;
+        }
         if (ch === "'") {
           if (pos + 1 < len && program[pos + 1] === "'") { pos += 2; continue; }
           inQuote = false;
@@ -130,6 +135,7 @@ function findNeck(clause: string): number {
   for (let i = 0; i < clause.length - 1; i++) {
     const ch = clause[i];
     if (inQuote) {
+      if (ch === "\\") { i++; continue; } // backslash escape: skip next char
       if (ch === "'" && clause[i + 1] === "'") { i++; continue; }
       if (ch === "'") inQuote = false;
       continue;
@@ -166,14 +172,18 @@ export function createPrologSolver(): Solver {
     type: "prolog",
 
     async solve(input: SolverInput): Promise<SolverResult> {
+      if (disposed) {
+        return { status: "error", error: "Solver has been disposed" };
+      }
       if (input.type !== "prolog") {
         return { status: "error", error: "Expected prolog input type" };
       }
 
       const explain = input.explain ?? false;
       const program = explain ? instrumentForTracing(input.program) : input.program;
+      const inferenceBudget = input.maxInferences ?? DEFAULT_MAX_INFERENCES;
 
-      const session = pl.create(MAX_INFERENCES);
+      const session = pl.create(inferenceBudget);
 
       try {
         await consult(session, program);

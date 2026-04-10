@@ -33,4 +33,15 @@ export interface Solver {
 /** Input to a solver */
 export type SolverInput =
   | { type: "z3"; smtlib: string }
-  | { type: "prolog"; program: string; query: string; explain?: boolean };
+  | {
+      type: "prolog";
+      program: string;
+      query: string;
+      explain?: boolean;
+      /**
+       * Override the default inference limit (100 000). Raise this for
+       * analyses that walk large graphs via list-based reachability rules,
+       * which are O(n²) per step. Lower it for adversarial input.
+       */
+      maxInferences?: number;
+    };

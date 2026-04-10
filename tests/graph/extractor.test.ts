@@ -44,6 +44,28 @@ describe("extractGraph", () => {
     expect(callPairs).toContain("b->c");
   });
 
+  it("does not emit nonsense callee names for unresolvable expressions", async () => {
+    // An IIFE, logical-or call, or template-tagged call can't be resolved
+    // statically — emit nothing rather than a bogus identifier like "a || b".
+    const graph = await extractGraph([{
+      path: "test.ts",
+      content: `
+        function outer() {
+          (a || b)();
+          (() => 1)();
+        }
+      `,
+    }]);
+
+    const outerCallees = graph.calls
+      .filter((c) => c.caller === "outer")
+      .map((c) => c.callee);
+    // None of the emitted callees should contain whitespace or operators.
+    for (const name of outerCallees) {
+      expect(name).not.toMatch(/[\s|&=<>+*/()]/);
+    }
+  });
+
   it("extracts method calls from member expressions", async () => {
     const graph = await extractGraph([{
       path: "test.ts",

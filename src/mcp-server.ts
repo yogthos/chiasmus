@@ -229,7 +229,7 @@ ANALYSES:
   callers      — who calls target? (needs target)
   callees      — what does target call? (needs target)
   reachability — can from reach to? (needs from, to)
-  dead-code    — functions unreachable from entry points
+  dead-code    — functions unreachable from entry points (methods excluded — dynamic dispatch)
   cycles       — circular call dependencies
   path         — call chain from→to (needs from, to)
   impact       — what breaks if target changes? (needs target)
@@ -721,6 +721,14 @@ async function handleGraph(args: Record<string, unknown>): Promise<CallToolResul
     return {
       content: [{ type: "text", text: JSON.stringify({
         error: "Required: files (string[]), analysis (string)",
+      }) }],
+    };
+  }
+
+  if (files.some((f) => typeof f !== "string")) {
+    return {
+      content: [{ type: "text", text: JSON.stringify({
+        error: "'files' must contain only strings",
       }) }],
     };
   }

@@ -212,6 +212,56 @@ describe("PrologSolver", () => {
     });
   });
 
+  describe("disposal", () => {
+    it("returns an error when solve is called after dispose", async () => {
+      const s = createPrologSolver();
+      s.dispose();
+      const result = await s.solve({
+        type: "prolog",
+        program: "f(1).",
+        query: "f(X).",
+      });
+      expect(result.status).toBe("error");
+      if (result.status === "error") {
+        expect(result.error).toMatch(/dispos/i);
+      }
+    });
+  });
+
+  describe("inference budget", () => {
+    it("honors a custom maxInferences on the solver input", async () => {
+      // A very low budget must cause a limit-exceeded error on a program
+      // that would normally succeed, proving the knob is wired through.
+      solver = createPrologSolver();
+      const result = await solver.solve({
+        type: "prolog",
+        program: `
+          f(0).
+          f(N) :- N > 0, N1 is N - 1, f(N1).
+        `,
+        query: "f(50).",
+        maxInferences: 10,
+      });
+      expect(result.status).toBe("error");
+    });
+
+    it("allows raising the budget for analyses that need more headroom", async () => {
+      // Default budget (100_000) is plenty for this query, but we also want
+      // to prove that a raised budget still works — the raise path exists.
+      solver = createPrologSolver();
+      const result = await solver.solve({
+        type: "prolog",
+        program: `
+          f(0).
+          f(N) :- N > 0, N1 is N - 1, f(N1).
+        `,
+        query: "f(50).",
+        maxInferences: 5_000_000,
+      });
+      expect(result.status).toBe("success");
+    });
+  });
+
   it("handles list operations", async () => {
     solver = createPrologSolver();
     const result = await solver.solve({

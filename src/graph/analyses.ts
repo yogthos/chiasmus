@@ -7,6 +7,12 @@ import type { CodeGraph } from "./types.js";
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 
+// Graph analyses run system-generated Prolog (not user input) and walk
+// cycle-safe reachability rules that are O(n²) per step. The default
+// 100 000 inference budget gets exhausted on mid-size codebases (a few
+// hundred functions), so we raise it for analyses.
+const GRAPH_MAX_INFERENCES = 5_000_000;
+
 export type AnalysisType =
   | "summary" | "callers" | "callees" | "reachability"
   | "dead-code" | "cycles" | "path" | "impact" | "facts"
@@ -72,7 +78,7 @@ export async function runAnalysis(
 
   const solver = createPrologSolver();
   try {
-    const solverResult = await solver.solve({ type: "prolog", program, query });
+    const solverResult = await solver.solve({ type: "prolog", program, query, maxInferences: GRAPH_MAX_INFERENCES });
     return { analysis: request.analysis, result: formatResult(request.analysis, solverResult) };
   } finally {
     solver.dispose();
@@ -105,7 +111,7 @@ export async function runAnalysisFromGraph(
 
   const solver = createPrologSolver();
   try {
-    const solverResult = await solver.solve({ type: "prolog", program, query });
+    const solverResult = await solver.solve({ type: "prolog", program, query, maxInferences: GRAPH_MAX_INFERENCES });
     return { analysis: request.analysis, result: formatResult(request.analysis, solverResult) };
   } finally {
     solver.dispose();

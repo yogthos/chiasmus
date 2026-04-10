@@ -130,5 +130,52 @@ describe("Spec Linting", () => {
       );
       expect(result.errors).toHaveLength(0);
     });
+
+    it("Prolog with doubled-quote escape in atom passes", () => {
+      // 'it''s' is a valid ISO-Prolog atom meaning "it's". The lint must
+      // not treat the inner '' as a terminator/opener and then see phantom
+      // unbalanced parentheses in trailing content.
+      const result = lintSpec(
+        "says(user, 'it''s fine').",
+        "prolog"
+      );
+      expect(result.errors).toHaveLength(0);
+    });
+
+    it("Prolog with backslash-quote escape in atom passes", () => {
+      const result = lintSpec(
+        "says(user, 'it\\'s fine').",
+        "prolog"
+      );
+      expect(result.errors).toHaveLength(0);
+    });
+
+    it("Prolog with % inside an atom is not treated as a line comment", () => {
+      // A % inside a quoted atom is just a char, not a comment.
+      // The naive comment stripper would eat everything to EOL, leaving
+      // an unterminated atom and unbalanced parens.
+      const result = lintSpec(
+        "p('50% done').",
+        "prolog"
+      );
+      expect(result.errors).toHaveLength(0);
+    });
+
+    it("Prolog with a paren inside a quoted atom is not counted as structural", () => {
+      // A `(` inside a quoted atom must not affect paren balance.
+      const result = lintSpec(
+        "p('opener: (').",
+        "prolog"
+      );
+      expect(result.errors).toHaveLength(0);
+    });
+
+    it("Prolog with /* inside an atom is not treated as a block comment", () => {
+      const result = lintSpec(
+        "p('/* not a comment */').",
+        "prolog"
+      );
+      expect(result.errors).toHaveLength(0);
+    });
   });
 });
