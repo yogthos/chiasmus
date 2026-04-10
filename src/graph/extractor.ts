@@ -4,48 +4,77 @@ import type { CodeGraph, DefinesFact, CallsFact, ImportsFact, ExportsFact, Conta
 
 /** Extract a unified call graph from multiple source files */
 export async function extractGraph(files: Array<{ path: string; content: string }>): Promise<CodeGraph> {
+  const partials = await Promise.all(files.map((file) => extractFileGraph(file)));
+
   const defines: DefinesFact[] = [];
   const calls: CallsFact[] = [];
   const imports: ImportsFact[] = [];
   const exports: ExportsFact[] = [];
   const contains: ContainsFact[] = [];
 
-  for (const file of files) {
-    const callSet = new Set<string>(); // deduplicate caller→callee per file
-    const lang = getLanguageForFile(file.path);
-    if (!lang) continue;
-
-    // Try sync first (CJS grammars), fall back to async (ESM grammars)
-    const tree = parseSource(file.content, file.path)
-      ?? await parseSourceAsync(file.content, file.path);
-    if (!tree) continue;
-
-    // Check for a registered adapter first
-    const adapter = getAdapter(lang);
-    if (adapter) {
-      const partial = adapter.extract(tree.rootNode, file.path);
-      for (const d of partial.defines) defines.push(d);
-      for (const c of partial.calls) {
-        const key = `${c.caller}->${c.callee}`;
-        if (!callSet.has(key)) { callSet.add(key); calls.push(c); }
-      }
-      for (const i of partial.imports) imports.push(i);
-      for (const e of partial.exports) exports.push(e);
-      for (const c of partial.contains ?? []) contains.push(c);
-    } else if (lang === "clojure") {
-      walkClojure(tree.rootNode, file.path, defines, calls, imports, exports, callSet);
-    } else if (lang === "python") {
-      const scopeStack: string[] = [];
-      walkPython(tree.rootNode, file.path, scopeStack, defines, calls, imports, exports, contains, callSet);
-    } else if (lang === "go") {
-      walkGo(tree.rootNode, file.path, defines, calls, imports, exports, contains, callSet);
-    } else {
-      const scopeStack: string[] = [];
-      walkNode(tree.rootNode, file.path, lang, scopeStack, defines, calls, imports, exports, contains, callSet);
-    }
+  for (const p of partials) {
+    defines.push(...p.defines);
+    calls.push(...p.calls);
+    imports.push(...p.imports);
+    exports.push(...p.exports);
+    contains.push(...p.contains);
   }
 
   return { defines, calls, imports, exports, contains };
+}
+
+async function extractFileGraph(file: { path: string; content: string }): Promise<CodeGraph> {
+  const defines: DefinesFact[] = [];
+  const calls: CallsFact[] = [];
+  const imports: ImportsFact[] = [];
+  const exports: ExportsFact[] = [];
+  const contains: ContainsFact[] = [];
+  const callSet = new Set<string>();
+
+  const lang = getLanguageForFile(file.path);
+  if (!lang) return { defines, calls, imports, exports, contains };
+
+  const tree = parseSource(file.content, file.path)
+    ?? await parseSourceAsync(file.content, file.path);
+  if (!tree) return { defines, calls, imports, exports, contains };
+
+  extractFromTree(tree, file.path, lang, defines, calls, imports, exports, contains, callSet);
+  return { defines, calls, imports, exports, contains };
+}
+
+function extractFromTree(
+  tree: any,
+  filePath: string,
+  lang: string,
+  defines: DefinesFact[],
+  calls: CallsFact[],
+  imports: ImportsFact[],
+  exports: ExportsFact[],
+  contains: ContainsFact[],
+  callSet: Set<string>,
+): void {
+  const adapter = getAdapter(lang);
+  if (adapter) {
+    const partial = adapter.extract(tree.rootNode, filePath);
+    for (const d of partial.defines) defines.push(d);
+    for (const c of partial.calls) {
+      const key = `${c.caller}->${c.callee}`;
+      if (!callSet.has(key)) { callSet.add(key); calls.push(c); }
+    }
+    for (const i of partial.imports) imports.push(i);
+    for (const e of partial.exports) exports.push(e);
+    for (const c of partial.contains ?? []) contains.push(c);
+  } else if (lang === "clojure") {
+    walkClojure(tree.rootNode, filePath, defines, calls, imports, exports, callSet);
+  } else if (lang === "python") {
+    const scopeStack: string[] = [];
+    walkPython(tree.rootNode, filePath, scopeStack, defines, calls, imports, exports, contains, callSet);
+  } else if (lang === "go") {
+    walkGo(tree.rootNode, filePath, defines, calls, imports, exports, contains, callSet);
+  } else {
+    const scopeStack: string[] = [];
+    walkNode(tree.rootNode, filePath, lang, scopeStack, defines, calls, imports, exports, contains, callSet);
+  }
 }
 
 function walkNode(

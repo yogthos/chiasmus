@@ -14,24 +14,24 @@ function getZ3() {
 /** Strip commands that we handle ourselves to avoid conflicts */
 function sanitizeSmtlib(input: string): string {
   return input
-    .replace(/\(\s*check-sat\s*\)/g, "")
-    .replace(/\(\s*get-model\s*\)/g, "")
-    .replace(/\(\s*get-unsat-core\s*\)/g, "")
-    .replace(/\(\s*exit\s*\)/g, "")
-    .replace(/\(\s*set-option\s+:produce-unsat-cores\s+\w+\s*\)/g, "")
+    .replace(/\(\s*(?:check-sat|get-model|get-unsat-core|exit|set-option\s+:produce-unsat-cores\s+\w+)\s*\)/g, "")
     .trim();
 }
 
 export async function createZ3Solver(): Promise<Solver> {
   const z3 = await getZ3();
   const ctx = z3.Context("main");
-
+  let activeCtx: typeof ctx | null = ctx;
   let disposed = false;
 
   return {
     type: "z3",
 
     async solve(input: SolverInput): Promise<SolverResult> {
+      if (disposed || !activeCtx) {
+        return { status: "error", error: "Solver has been disposed" };
+      }
+
       if (input.type !== "z3") {
         return { status: "error", error: "Expected z3 input type" };
       }
@@ -41,10 +41,11 @@ export async function createZ3Solver(): Promise<Solver> {
         return { status: "sat", model: {} };
       }
 
-      const solver = new ctx.Solver();
+      const solver = new activeCtx.Solver();
       try {
         solver.fromString(`(set-option :produce-unsat-cores true)\n${smtlib}`);
       } catch (e: unknown) {
+        solver.release();
         const msg = e instanceof Error ? e.message : String(e);
         return { status: "error", error: msg };
       }
@@ -53,6 +54,7 @@ export async function createZ3Solver(): Promise<Solver> {
       try {
         checkResult = await solver.check();
       } catch (e: unknown) {
+        solver.release();
         const msg = e instanceof Error ? e.message : String(e);
         return { status: "error", error: msg };
       }
@@ -64,13 +66,16 @@ export async function createZ3Solver(): Promise<Solver> {
           for (let i = 0; i < coreVector.length(); i++) {
             unsatCore.push(coreVector.get(i).sexpr());
           }
+          solver.release();
           return { status: "unsat", unsatCore };
         } catch {
+          solver.release();
           return { status: "unsat", unsatCore: [] };
         }
       }
 
       if (checkResult !== "sat") {
+        solver.release();
         return { status: "unknown" };
       }
 
@@ -80,8 +85,10 @@ export async function createZ3Solver(): Promise<Solver> {
         for (const decl of model.decls()) {
           assignments[decl.name()] = model.eval(decl.call()).toString();
         }
+        solver.release();
         return { status: "sat", model: assignments };
       } catch (e: unknown) {
+        solver.release();
         const msg = e instanceof Error ? e.message : String(e);
         return { status: "error", error: `Model extraction failed: ${msg}` };
       }
@@ -90,6 +97,7 @@ export async function createZ3Solver(): Promise<Solver> {
     dispose() {
       if (!disposed) {
         disposed = true;
+        activeCtx = null;
       }
     },
   };

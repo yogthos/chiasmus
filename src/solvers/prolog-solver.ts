@@ -43,87 +43,85 @@ function nextAnswer(session: ReturnType<typeof pl.create>): Promise<Record<strin
  * Facts and directives are left unchanged.
  */
 function instrumentForTracing(program: string): string {
-  const result: string[] = [":- dynamic(trace_goal/1)."];
+  const parts: string[] = [":- dynamic(trace_goal/1).\n\n"];
 
-  let i = 0;
-  while (i < program.length) {
-    // Skip whitespace
-    if (/\s/.test(program[i])) {
-      result.push(program[i]);
-      i++;
+  let pos = 0;
+  const len = program.length;
+
+  while (pos < len) {
+    // Skip whitespace in bulk
+    const wsStart = pos;
+    while (pos < len && /\s/.test(program[pos])) pos++;
+    if (pos > wsStart) {
+      parts.push(program.slice(wsStart, pos));
+    }
+    if (pos >= len) break;
+
+    // Skip line comments in bulk
+    if (program[pos] === "%") {
+      const nlIdx = program.indexOf("\n", pos);
+      if (nlIdx === -1) { parts.push(program.slice(pos)); break; }
+      parts.push(program.slice(pos, nlIdx + 1));
+      pos = nlIdx + 1;
       continue;
     }
 
-    // Skip line comments
-    if (program[i] === "%") {
-      const end = program.indexOf("\n", i);
-      if (end === -1) { result.push(program.slice(i)); break; }
-      result.push(program.slice(i, end + 1));
-      i = end + 1;
-      continue;
-    }
-
-    // Collect a clause: from current position to the terminating period,
-    // respecting parenthesized terms and quoted atoms.
-    const clauseStart = i;
+    // Scan a clause: from pos to the next period at depth 0
+    const clauseStart = pos;
     let depth = 0;
     let inQuote = false;
 
-    while (i < program.length) {
-      const ch = program[i];
+    while (pos < len) {
+      const ch = program[pos];
 
       if (inQuote) {
         if (ch === "'") {
-          if (program[i + 1] === "'") { i += 2; continue; }
+          if (pos + 1 < len && program[pos + 1] === "'") { pos += 2; continue; }
           inQuote = false;
         }
-        i++;
+        pos++;
         continue;
       }
 
-      if (ch === "'") { inQuote = true; i++; continue; }
+      if (ch === "'") { inQuote = true; pos++; continue; }
       if (ch === "%") {
-        const end = program.indexOf("\n", i);
-        if (end === -1) { i = program.length; break; }
-        i = end + 1;
+        const nlIdx = program.indexOf("\n", pos);
+        if (nlIdx === -1) { pos = len; break; }
+        pos = nlIdx + 1;
         continue;
       }
-      if (ch === "(") { depth++; i++; continue; }
-      if (ch === ")") { depth--; i++; continue; }
+      if (ch === "(") { depth++; pos++; continue; }
+      if (ch === ")") { depth--; pos++; continue; }
 
       if (ch === "." && depth === 0) {
-        i++;
-        const clause = program.slice(clauseStart, i).trim();
+        pos++;
+        const clause = program.slice(clauseStart, pos).trim();
 
-        // Skip directives
         if (clause.startsWith(":-")) {
-          result.push(clause + "\n");
+          parts.push(clause + "\n");
           break;
         }
 
-        // Check for rule (has :- at depth 0)
         const neckIdx = findNeck(clause);
         if (neckIdx >= 0) {
           const head = clause.slice(0, neckIdx).trim();
-          const body = clause.slice(neckIdx + 2).slice(0, -1).trim(); // remove ":-" and trailing "."
-          result.push(`${head} :- ${body}, assertz(trace_goal(${head})).\n`);
+          const body = clause.slice(neckIdx + 2).slice(0, -1).trim();
+          parts.push(`${head} :- ${body}, assertz(trace_goal(${head})).\n`);
         } else {
-          // Fact — no instrumentation needed
-          result.push(clause + "\n");
+          parts.push(clause + "\n");
         }
         break;
       }
 
-      i++;
+      pos++;
     }
 
-    // If we didn't find a period (shouldn't happen with valid Prolog), emit as-is
-    if (i >= program.length && program.slice(clauseStart, i).trim()) {
-      result.push(program.slice(clauseStart));
+    if (pos >= len && program.slice(clauseStart, pos).trim()) {
+      parts.push(program.slice(clauseStart));
     }
   }
 
-  return result.join("").trim();
+  return parts.join("").trim();
 }
 
 function findNeck(clause: string): number {

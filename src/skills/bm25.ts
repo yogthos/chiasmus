@@ -58,6 +58,52 @@ export function buildIndex(texts: string[]): BM25Index {
   return { docs, idf, avgLength };
 }
 
+/** Incrementally add a document to an existing index (avoids full rebuild) */
+export function addToIndex(index: BM25Index, text: string): void {
+  const tokens = tokenize(text);
+  const doc: DocEntry = { index: index.docs.length, tokens, length: tokens.length };
+
+  // Update avgLength incrementally
+  const totalLength = index.avgLength * index.docs.length + doc.length;
+  index.docs.push(doc);
+  index.avgLength = totalLength / index.docs.length;
+
+  // Update IDF: recompute for affected terms
+  const N = index.docs.length;
+  const seen = new Set(doc.tokens);
+
+  // First, increment doc frequency for new terms
+  for (const term of seen) {
+    // We need to count all docs containing this term — the existing IDF may be stale
+    // For incremental add, just count the new doc's contribution
+    let df = 0;
+    for (const d of index.docs) {
+      if (new Set(d.tokens).has(term)) df++;
+    }
+    index.idf.set(term, Math.log((N - df + 0.5) / (df + 0.5) + 1));
+  }
+}
+
+/** Remove a document from the index by its position. Returns true if removed. */
+export function removeFromIndex(index: BM25Index, docIndex: number): boolean {
+  if (docIndex < 0 || docIndex >= index.docs.length) return false;
+
+  // Recompute from remaining docs
+  const remaining = index.docs.filter((_, i) => i !== docIndex);
+  const texts = remaining.map((d) => d.tokens.join(" "));
+  const rebuilt = buildIndex(texts);
+
+  // Mutate in place
+  index.docs.length = 0;
+  index.docs.push(...rebuilt.docs);
+  index.idf.clear();
+  for (const [k, v] of rebuilt.idf) {
+    index.idf.set(k, v);
+  }
+  index.avgLength = rebuilt.avgLength;
+  return true;
+}
+
 export function search(
   index: BM25Index,
   query: string,

@@ -10,11 +10,14 @@ export function escapeAtom(s: string): string {
   return `'${s.replace(/'/g, "''")}'`;
 }
 
+/** Shared list membership predicate (used by multiple rule sets) */
+export const MEMBER_RULES = `
+member(X, [X|_]).
+member(X, [_|T]) :- member(X, T).`.trim();
+
 /** Built-in Prolog rules for graph analysis (cycle-safe) */
 export const BUILTIN_RULES = `
-% List membership (not built-in in Tau Prolog without lists module)
-member(X, [X|_]).
-member(X, [_|T]) :- member(X, T).
+${MEMBER_RULES}
 
 % Cycle-safe reachability via visited list
 reaches(A, B) :- reaches(A, B, [A]).

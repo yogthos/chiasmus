@@ -6,8 +6,10 @@ const require = createRequire(import.meta.url);
 
 // Lazy-loaded tree-sitter parsers (native for CJS grammars, WASM for Clojure)
 let NativeParser: any = null;
+let nativeParserInstance: any = null;
 let WasmParserClass: any = null;
 let WasmLanguageClass: any = null;
+let wasmParserInstance: any = null;
 const languageCache = new Map<string, { lang: any; wasm: boolean }>();
 
 interface LangConfig {
@@ -49,6 +51,14 @@ function getNativeParser(): any {
     NativeParser = require("tree-sitter");
   }
   return NativeParser;
+}
+
+function getNativeParserInstance(): any {
+  if (!nativeParserInstance) {
+    const ParserClass = getNativeParser();
+    nativeParserInstance = new ParserClass();
+  }
+  return nativeParserInstance;
 }
 
 async function initWasm(): Promise<void> {
@@ -142,10 +152,17 @@ export function parseSource(content: string, filePath: string): any | null {
   const loaded = loadLanguageSync(language);
   if (!loaded) return null;
 
-  const ParserClass = getNativeParser();
-  const parser = new ParserClass();
+  const parser = getNativeParserInstance();
   parser.setLanguage(loaded.lang);
   return parser.parse(content);
+}
+
+/** Get or create the cached WASM parser instance. */
+function getWasmParserInstance(): any {
+  if (!wasmParserInstance) {
+    wasmParserInstance = new WasmParserClass();
+  }
+  return wasmParserInstance;
 }
 
 /** Async parse — handles both native CJS and WASM grammars. */
@@ -158,13 +175,12 @@ export async function parseSourceAsync(content: string, filePath: string): Promi
 
   if (loaded.wasm) {
     await initWasm();
-    const parser = new WasmParserClass();
+    const parser = getWasmParserInstance();
     parser.setLanguage(loaded.lang);
     return parser.parse(content);
   }
 
-  const ParserClass = getNativeParser();
-  const parser = new ParserClass();
+  const parser = getNativeParserInstance();
   parser.setLanguage(loaded.lang);
   return parser.parse(content);
 }

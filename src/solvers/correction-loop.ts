@@ -43,22 +43,17 @@ export async function correctionLoop(
   fixer: SpecFixer,
   options: CorrectionLoopOptions = {},
 ): Promise<CorrectionResult> {
-  return genericCorrectionLoop<SolverInput, SolverResult>(
-    initialInput,
-    // submit: create a solver session, run, dispose
-    async (input) => {
-      const solverType = input.type === "z3" ? "z3" as const : "prolog" as const;
-      const session = await SolverSession.create(solverType);
-      try {
-        return await session.solve(input);
-      } finally {
-        session.dispose();
-      }
-    },
-    // isError: check if result is a solver error
-    (result) => (result.status === "error" ? result.error : null),
-    // fixer: delegate to caller's fixer
-    fixer,
-    options,
-  );
+  const solverType = initialInput.type === "z3" ? "z3" as const : "prolog" as const;
+  const session = await SolverSession.create(solverType);
+  try {
+    return await genericCorrectionLoop<SolverInput, SolverResult>(
+      initialInput,
+      async (input) => session.solve(input),
+      (result) => (result.status === "error" ? result.error : null),
+      fixer,
+      options,
+    );
+  } finally {
+    session.dispose();
+  }
 }

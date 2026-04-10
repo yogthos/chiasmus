@@ -1,9 +1,11 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { extractGraph } from "./extractor.js";
 import { graphToProlog, escapeAtom } from "./facts.js";
 import { createPrologSolver } from "../solvers/prolog-solver.js";
 import type { SolverResult, PrologAnswer } from "../solvers/types.js";
 import type { CodeGraph } from "./types.js";
+
+const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 
 export type AnalysisType =
   | "summary" | "callers" | "callees" | "reachability"
@@ -27,11 +29,19 @@ export async function runAnalysis(
   filePaths: string[],
   request: AnalysisRequest,
 ): Promise<AnalysisResult> {
-  // Read files from disk
-  const files = filePaths.map((p) => ({
-    path: p,
-    content: readFileSync(p, "utf-8"),
-  }));
+  // Read files from disk with size check
+  const files: Array<{ path: string; content: string }> = [];
+  for (const p of filePaths) {
+    try {
+      const stat = statSync(p);
+      if (stat.size > MAX_FILE_SIZE) {
+        continue; // skip oversized files
+      }
+      files.push({ path: p, content: readFileSync(p, "utf-8") });
+    } catch {
+      continue; // skip unreadable files
+    }
+  }
 
   const graph = await extractGraph(files);
   const program = graphToProlog(graph, request.entryPoints);

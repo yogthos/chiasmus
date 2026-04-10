@@ -4,6 +4,7 @@ import { OpenAICompatibleAdapter } from "./openai-compatible.js";
 const DEFAULT_MODEL = "claude-sonnet-4-20250514";
 const DEFAULT_URL = "https://api.anthropic.com/v1/messages";
 const DEFAULT_MAX_TOKENS = 4096;
+const DEFAULT_TIMEOUT_MS = 30_000;
 
 export interface AnthropicConfig {
   apiKey: string;
@@ -44,6 +45,7 @@ export class AnthropicAdapter implements LLMAdapter {
         "anthropic-version": "2023-06-01",
       },
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
     });
 
     if (!response.ok) {

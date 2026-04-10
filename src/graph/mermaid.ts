@@ -1,4 +1,4 @@
-import { escapeAtom } from "./facts.js";
+import { escapeAtom, MEMBER_RULES } from "./facts.js";
 
 type DiagramType = "flowchart" | "stateDiagram";
 
@@ -20,18 +20,14 @@ interface MermaidGraph {
 }
 
 const FLOWCHART_RULES = `
-% Cycle-safe reachability for flowcharts
-member(X, [X|_]).
-member(X, [_|T]) :- member(X, T).
+${MEMBER_RULES}
 reaches(A, B) :- reaches(A, B, [A]).
 reaches(A, B, _) :- edge(A, B).
 reaches(A, B, Visited) :- edge(A, Mid), \\+ member(Mid, Visited), reaches(Mid, B, [Mid|Visited]).
 `.trim();
 
 const STATE_RULES = `
-% Cycle-safe reachability for state diagrams
-member(X, [X|_]).
-member(X, [_|T]) :- member(X, T).
+${MEMBER_RULES}
 can_reach(A, B) :- can_reach(A, B, [A]).
 can_reach(A, B, _) :- transition(A, B, _).
 can_reach(A, B, Visited) :- transition(A, Mid, _), \\+ member(Mid, Visited), can_reach(Mid, B, [Mid|Visited]).
