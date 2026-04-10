@@ -38,7 +38,14 @@ async function extractFileGraph(file: { path: string; content: string }): Promis
     ?? await parseSourceAsync(file.content, file.path);
   if (!tree) return { defines, calls, imports, exports, contains };
 
-  extractFromTree(tree, file.path, lang, defines, calls, imports, exports, contains, callSet);
+  try {
+    extractFromTree(tree, file.path, lang, defines, calls, imports, exports, contains, callSet);
+  } finally {
+    // web-tree-sitter (WASM) trees must be explicitly freed or WASM memory
+    // grows monotonically. Native tree-sitter trees have no delete method
+    // and are GC'd normally — guard with optional chaining.
+    (tree as any).delete?.();
+  }
   return { defines, calls, imports, exports, contains };
 }
 
@@ -274,13 +281,12 @@ function resolveCallee(callNode: any): string | null {
       return property?.text ?? null;
     }
 
-    // Dynamic calls like obj[x]() — not statically resolvable
-    case "subscript_expression":
-      return null;
-
     default:
-      // For other cases (e.g., IIFE, template literals), try the text if short
-      return fnNode.text.length <= 50 ? fnNode.text : null;
+      // Dynamic/compound calls (subscript, IIFE, logical-or, tagged template,
+      // parenthesized expressions) can't be resolved statically. Emitting the
+      // raw text like "(a || b)" or "() => 1" just produces noise in the
+      // downstream facts, so drop them.
+      return null;
   }
 }
 
@@ -500,7 +506,7 @@ function resolvePythonCallee(callNode: any): string | null {
     }
 
     default:
-      return fnNode.text.length <= 50 ? fnNode.text : null;
+      return null;
   }
 }
 
@@ -661,7 +667,7 @@ function resolveGoCallee(callNode: any): string | null {
     }
 
     default:
-      return fnNode.text.length <= 50 ? fnNode.text : null;
+      return null;
   }
 }
 
@@ -736,7 +742,6 @@ function cljExtractNs(
   listNode: any,
   filePath: string,
   imports: ImportsFact[],
-  exports: ExportsFact[],
 ): string | null {
   let symIdx = -1;
   for (let i = 0; i < listNode.childCount; i++) {
@@ -811,7 +816,7 @@ function walkClojure(
     if (child.type !== "list_lit") continue;
 
     // Check for ns form
-    const nsName = cljExtractNs(child, filePath, imports, exports);
+    const nsName = cljExtractNs(child, filePath, imports);
     if (nsName) continue;
 
     // Check for defn/defn-
@@ -843,6 +848,34 @@ function walkClojure(
   }
 }
 
+/**
+ * Clojure special forms and core macros that look like function calls in
+ * the AST (first position of a list_lit) but are not real call edges.
+ * Filtering these removes ~80% of the noise from cljExtractCalls output.
+ */
+const CLJ_SPECIAL_FORMS = new Set([
+  // Core special forms
+  "def", "do", "fn", "fn*", "if", "let", "let*", "letfn", "letfn*",
+  "loop", "loop*", "monitor-enter", "monitor-exit", "new", "quote",
+  "recur", "set!", "throw", "try", "catch", "finally", "var",
+  // Definition macros
+  "defn", "defn-", "defmacro", "defmulti", "defmethod", "defprotocol",
+  "defrecord", "deftype", "definterface", "defonce", "defstruct",
+  // Control-flow / binding macros
+  "when", "when-not", "when-let", "when-some", "when-first",
+  "if-let", "if-some", "if-not",
+  "cond", "condp", "case",
+  "and", "or", "not",
+  "do", "doto", "dotimes", "doseq", "dorun", "doall",
+  "for", "while",
+  // Threading macros
+  "->", "->>", "as->", "some->", "some->>", "cond->", "cond->>",
+  // Misc
+  "declare", "comment", "assert", "lazy-seq", "delay", "force",
+  "binding", "locking", "sync", "with-open", "with-local-vars",
+  "with-meta", "with-redefs", "with-redefs-fn",
+]);
+
 /** Recursively extract function calls from a Clojure form */
 function cljExtractCalls(
   node: any,
@@ -863,10 +896,12 @@ function cljExtractCalls(
             if (callee.includes("/")) {
               callee = callee.split("/").pop()!;
             }
-            const key = `${enclosingFn}->${callee}`;
-            if (!callSet.has(key)) {
-              callSet.add(key);
-              calls.push({ caller: enclosingFn, callee });
+            if (!CLJ_SPECIAL_FORMS.has(callee)) {
+              const key = `${enclosingFn}->${callee}`;
+              if (!callSet.has(key)) {
+                callSet.add(key);
+                calls.push({ caller: enclosingFn, callee });
+              }
             }
           }
           break;

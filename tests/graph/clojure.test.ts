@@ -136,6 +136,40 @@ describe("Clojure support", () => {
       expect(callPairs).toContain("query->execute");
     });
 
+    it("does not treat Clojure special forms as function calls", async () => {
+      const graph = await extractGraph([{
+        path: "core.clj",
+        content: `
+(defn handler [req]
+  (let [x (process req)]
+    (when x
+      (if (valid? x)
+        (do (log x) (format x))
+        (report x)))))
+        `,
+      }]);
+
+      const callees = graph.calls
+        .filter((c) => c.caller === "handler")
+        .map((c) => c.callee);
+
+      // Real calls must be present.
+      expect(callees).toContain("process");
+      expect(callees).toContain("valid?");
+      expect(callees).toContain("log");
+      expect(callees).toContain("format");
+      expect(callees).toContain("report");
+
+      // Special forms / macros must not appear.
+      const forbidden = ["let", "when", "if", "do", "fn", "fn*", "loop", "recur",
+        "cond", "case", "try", "catch", "finally", "quote", "var",
+        "throw", "def", "defn", "defn-", "->", "->>", "as->",
+        "some->", "some->>", "and", "or", "not", "doto", "new", "set!"];
+      for (const form of forbidden) {
+        expect(callees).not.toContain(form);
+      }
+    });
+
     it("deduplicates call edges", async () => {
       const graph = await extractGraph([{
         path: "core.clj",

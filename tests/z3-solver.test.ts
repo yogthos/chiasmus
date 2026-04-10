@@ -1,6 +1,30 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { createZ3Solver } from "../src/solvers/z3-solver.js";
+import { createZ3Solver, prepareSmtlib } from "../src/solvers/z3-solver.js";
 import type { Solver } from "../src/solvers/types.js";
+
+describe("prepareSmtlib", () => {
+  it("injects a default :timeout when none is set", () => {
+    const out = prepareSmtlib("(declare-const x Int)\n(assert (> x 5))");
+    expect(out).toMatch(/\(set-option\s+:timeout\s+\d+\)/);
+  });
+
+  it("does not override an explicit :timeout", () => {
+    const out = prepareSmtlib(
+      "(set-option :timeout 1234)\n(declare-const x Int)\n(assert (> x 0))"
+    );
+    const matches = out.match(/\(set-option\s+:timeout\s+(\d+)\)/g) ?? [];
+    expect(matches).toHaveLength(1);
+    expect(matches[0]).toContain("1234");
+  });
+
+  it("still strips check-sat and get-model", () => {
+    const out = prepareSmtlib(
+      "(declare-const x Int)\n(assert (> x 0))\n(check-sat)\n(get-model)"
+    );
+    expect(out).not.toContain("check-sat");
+    expect(out).not.toContain("get-model");
+  });
+});
 
 describe("Z3Solver", () => {
   let solver: Solver;

@@ -117,6 +117,21 @@ function unusedHelper() {}
     expect(parsed.error).toBeTruthy();
   });
 
+  it("returns a clean error when files contains non-string elements", async () => {
+    const result = await client.callTool({
+      name: "chiasmus_graph",
+      arguments: {
+        files: [join(srcDir, "server.ts"), 42, null],
+        analysis: "summary",
+      },
+    });
+
+    const content = result.content as Array<{ type: string; text: string }>;
+    const parsed = JSON.parse(content[0].text);
+    expect(parsed.error).toBeTruthy();
+    expect(String(parsed.error)).toMatch(/files/i);
+  });
+
   it("returns facts as raw Prolog", async () => {
     const result = await client.callTool({
       name: "chiasmus_graph",
