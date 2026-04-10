@@ -83,11 +83,17 @@ function lintSmtlib(
   let depth = 0;
   for (let i = 0; i < cleaned.length; i++) {
     const ch = cleaned[i];
-    // Skip string literals
+    // Skip string literals (SMT-LIB uses "" to escape " within strings)
     if (ch === '"') {
       i++;
-      while (i < cleaned.length && cleaned[i] !== '"') {
-        if (cleaned[i] === '\\') i++;
+      while (i < cleaned.length) {
+        if (cleaned[i] === '"') {
+          if (i + 1 < cleaned.length && cleaned[i + 1] === '"') {
+            i += 2; // skip doubled quote
+            continue;
+          }
+          break; // end of string
+        }
         i++;
       }
       continue;

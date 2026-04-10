@@ -32,4 +32,16 @@ describe("extractor: multiple arrow functions in one declaration", () => {
     const callees = graph.calls.map((c) => c.callee);
     expect(callees).toContain("baz");
   });
+
+  it("walks non-arrow initializer alongside arrow functions", async () => {
+    const code = `const fn = () => { foo(); }, x = bar();`;
+    const graph = await extractGraph([
+      { path: "test.js", content: code },
+    ]);
+    const fnNames = graph.defines.map((d) => d.name);
+    expect(fnNames).toContain("fn");
+    expect(fnNames).not.toContain("x");
+    const callees = graph.calls.map((c) => c.callee);
+    expect(callees).toContain("foo");
+  });
 });

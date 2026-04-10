@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { extractGraph } from "./extractor.js";
-import { graphToProlog } from "./facts.js";
+import { graphToProlog, escapeAtom } from "./facts.js";
 import { createPrologSolver } from "../solvers/prolog-solver.js";
 import type { SolverResult, PrologAnswer } from "../solvers/types.js";
 import type { CodeGraph } from "./types.js";
@@ -108,15 +108,15 @@ function buildQuery(request: AnalysisRequest): string | null {
   switch (request.analysis) {
     case "callers":
       if (!request.target) return null;
-      return `caller_of(${request.target}, X).`;
+      return `caller_of(${escapeAtom(request.target)}, X).`;
 
     case "callees":
       if (!request.target) return null;
-      return `callee_of(${request.target}, X).`;
+      return `callee_of(${escapeAtom(request.target)}, X).`;
 
     case "reachability":
       if (!request.from || !request.to) return null;
-      return `reaches(${request.from}, ${request.to}).`;
+      return `reaches(${escapeAtom(request.from)}, ${escapeAtom(request.to)}).`;
 
     case "dead-code":
       return "dead(X).";
@@ -126,11 +126,11 @@ function buildQuery(request: AnalysisRequest): string | null {
 
     case "path":
       if (!request.from || !request.to) return null;
-      return `path(${request.from}, ${request.to}, Path).`;
+      return `path(${escapeAtom(request.from)}, ${escapeAtom(request.to)}, Path).`;
 
     case "impact":
       if (!request.target) return null;
-      return `reaches(X, ${request.target}).`;
+      return `reaches(X, ${escapeAtom(request.target)}).`;
 
     default:
       return null;

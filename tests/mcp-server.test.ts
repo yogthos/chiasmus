@@ -402,6 +402,24 @@ describe("Chiasmus MCP Server", () => {
       expect(parsed[1].answers[0].bindings.X).toBe("c");
       expect(parsed[2].answers[0].bindings.X).toBe("d");
     });
+
+    it("stops batch on first error", async () => {
+      const result = await client.callTool({
+        name: "chiasmus_verify",
+        arguments: {
+          solver: "prolog",
+          input: "edge(a, b). edge(b, c).",
+          queries: ["edge(a, X).", "invalid((((", "edge(b, X)."],
+        },
+      });
+
+      const content = result.content as Array<{ type: string; text: string }>;
+      const parsed = JSON.parse(content[0].text);
+      expect(Array.isArray(parsed)).toBe(true);
+      expect(parsed).toHaveLength(2);
+      expect(parsed[0].status).toBe("success");
+      expect(parsed[1].status).toBe("error");
+    });
   });
 
   describe("chiasmus_craft", () => {
