@@ -214,7 +214,7 @@ Add tree-sitter support for any language by publishing an npm package named `chi
 
 ```ts
 // chiasmus-adapter-rust/index.ts
-import type { LanguageAdapter } from "chiasmus/adapter";
+import type { LanguageAdapter } from "chiasmus/graph";
 
 const adapter: LanguageAdapter = {
   language: "rust",
@@ -271,6 +271,97 @@ export default {
 | `searchPaths` | `string[]` (optional) | Additional directories to scan for adapter modules |
 
 Built-in languages always take precedence over adapters with the same extensions.
+
+## Library Usage
+
+Chiasmus can be used as a library in any Node.js project:
+
+```bash
+npm install chiasmus
+```
+
+### Quick Start
+
+```ts
+import { SolverSession, lintSpec, SkillLibrary, FormalizationEngine } from "chiasmus";
+```
+
+Or import from specific subpaths:
+
+```ts
+import { createZ3Solver, createPrologSolver } from "chiasmus/solvers";
+import { extractGraph, runAnalysis } from "chiasmus/graph";
+import { lintSpec, FormalizationEngine } from "chiasmus/formalize";
+import { SkillLibrary, SkillLearner } from "chiasmus/skills";
+import { createLLMFromEnv } from "chiasmus/llm";
+```
+
+### Solvers
+
+```ts
+import { SolverSession } from "chiasmus/solvers";
+
+const session = await SolverSession.create("z3");
+try {
+  const result = await session.solve({
+    type: "z3",
+    smtlib: `(declare-const x Int) (assert (> x 5))`,
+  });
+  if (result.status === "sat") {
+    console.log("Satisfiable:", result.model);
+  }
+} finally {
+  session.dispose();
+}
+```
+
+### Graph Analysis
+
+```ts
+import { extractGraph, runAnalysis } from "chiasmus/graph";
+
+const result = await runAnalysis(
+  ["src/server.ts", "src/db.ts"],
+  { analysis: "dead-code" }
+);
+console.log(result.result);
+```
+
+### Lint & Validation
+
+```ts
+import { lintSpec } from "chiasmus/formalize";
+
+const { spec, fixes, errors } = lintSpec(rawSpec, "z3");
+if (errors.length > 0) {
+  console.error("Lint errors:", errors);
+}
+```
+
+### Skill Library
+
+```ts
+import { SkillLibrary } from "chiasmus/skills";
+import { join } from "node:path";
+import { homedir } from "node:os";
+
+const library = await SkillLibrary.create(join(homedir(), ".chiasmus"));
+const results = library.search("access control policy conflict");
+console.log(results);
+library.close();
+```
+
+### Exports
+
+| Subpath | Exports |
+|---------|---------|
+| `chiasmus` | All public APIs (barrel export) |
+| `chiasmus/solvers` | `SolverSession`, `createZ3Solver`, `createPrologSolver`, `correctionLoop`, solver types |
+| `chiasmus/graph` | `extractGraph`, `runAnalysis`, `runAnalysisFromGraph`, `parseMermaid`, `graphToProlog`, adapter registry, graph types |
+| `chiasmus/formalize` | `lintSpec`, `classifyFeedback`, `extractPrologQuery`, `FormalizationEngine`, result types |
+| `chiasmus/skills` | `SkillLibrary`, `SkillLearner`, `craftTemplate`, `validateTemplate`, skill types |
+| `chiasmus/llm` | `createLLMFromEnv`, `AnthropicAdapter`, `OpenAICompatibleAdapter`, LLM types |
+| `chiasmus/mcp` | `createChiasmusServer`, `getChiasmusHome` |
 
 ## Configuration
 
