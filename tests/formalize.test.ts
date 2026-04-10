@@ -46,12 +46,12 @@ describe("FormalizationEngine", () => {
       expect(["rule-inference", "permission-derivation"]).toContain(name);
     });
 
-    it("selects graph-reachability for data flow problems", async () => {
+    it("selects taint-propagation or graph-reachability for data flow problems", async () => {
       const result = await engine.formalize(
         "Can user input reach the database through any chain of function calls?"
       );
 
-      expect(result.template.name).toBe("graph-reachability");
+      expect(["taint-propagation", "graph-reachability"]).toContain(result.template.name);
     });
 
     it("selects constraint-satisfaction for dependency problems", async () => {

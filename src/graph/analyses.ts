@@ -9,7 +9,8 @@ const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 
 export type AnalysisType =
   | "summary" | "callers" | "callees" | "reachability"
-  | "dead-code" | "cycles" | "path" | "impact" | "facts";
+  | "dead-code" | "cycles" | "path" | "impact" | "facts"
+  | "layer-violation";
 
 export interface AnalysisRequest {
   analysis: AnalysisType;
@@ -57,6 +58,13 @@ export async function runAnalysis(
     };
   }
 
+  if (request.analysis === "layer-violation") {
+    return {
+      analysis: "layer-violation",
+      result: findLayerViolations(graph),
+    };
+  }
+
   const query = buildQuery(request);
   if (!query) {
     return { analysis: request.analysis, result: { error: "Missing required parameters" } };
@@ -86,6 +94,10 @@ export async function runAnalysisFromGraph(
     return { analysis: "summary", result: buildSummary(graph) };
   }
 
+  if (request.analysis === "layer-violation") {
+    return { analysis: "layer-violation", result: findLayerViolations(graph) };
+  }
+
   const query = buildQuery(request);
   if (!query) {
     return { analysis: request.analysis, result: { error: "Missing required parameters" } };
@@ -98,6 +110,62 @@ export async function runAnalysisFromGraph(
   } finally {
     solver.dispose();
   }
+}
+
+const LAYER_ORDER: Record<string, number> = {
+  handlers: 0,
+  routes: 0,
+  controllers: 0,
+  services: 1,
+  repositories: 2,
+  db: 3,
+  models: 3,
+};
+
+interface LayerViolation {
+  caller: string;
+  callee: string;
+  callerLayer: string;
+  calleeLayer: string;
+}
+
+function extractLayer(filePath: string): string | null {
+  const normalized = filePath.replace(/\\/g, "/");
+  const segments = normalized.split("/");
+  for (const seg of segments) {
+    if (seg in LAYER_ORDER) return seg;
+  }
+  return null;
+}
+
+function findLayerViolations(graph: CodeGraph): LayerViolation[] {
+  const funcLayers = new Map<string, string>();
+  for (const d of graph.defines) {
+    const layer = extractLayer(d.file);
+    if (layer) funcLayers.set(d.name, layer);
+  }
+
+  const violations: LayerViolation[] = [];
+  for (const c of graph.calls) {
+    const callerLayer = funcLayers.get(c.caller);
+    const calleeLayer = funcLayers.get(c.callee);
+    if (!callerLayer || !calleeLayer) continue;
+    if (callerLayer === calleeLayer) continue;
+
+    const callerOrder = LAYER_ORDER[callerLayer] ?? 0;
+    const calleeOrder = LAYER_ORDER[calleeLayer] ?? 0;
+
+    if (calleeOrder - callerOrder > 1) {
+      violations.push({
+        caller: c.caller,
+        callee: c.callee,
+        callerLayer,
+        calleeLayer,
+      });
+    }
+  }
+
+  return violations;
 }
 
 function buildSummary(graph: CodeGraph) {

@@ -246,7 +246,7 @@ describe("Chiasmus MCP Server", () => {
       const content = result.content as Array<{ type: string; text: string }>;
       const parsed = JSON.parse(content[0].text);
       expect(Array.isArray(parsed)).toBe(true);
-      expect(parsed.length).toBe(8); // 5 Z3 + 3 Prolog starters
+      expect(parsed.length).toBe(14); // 8 Z3 + 6 Prolog templates
     });
 
     it("filters by solver type", async () => {
@@ -260,7 +260,7 @@ describe("Chiasmus MCP Server", () => {
       const content = result.content as Array<{ type: string; text: string }>;
       const parsed = JSON.parse(content[0].text);
       expect(Array.isArray(parsed)).toBe(true);
-      expect(parsed.length).toBe(3);
+      expect(parsed.length).toBe(6);
       for (const item of parsed) {
         expect(item.template.solver).toBe("prolog");
       }
@@ -484,6 +484,120 @@ describe("Chiasmus MCP Server", () => {
       const parsed = JSON.parse(content[0].text);
       expect(parsed.created).toBe(false);
       expect(parsed.errors.length).toBeGreaterThan(0);
+    });
+  });
+
+  describe("chiasmus_review", () => {
+    it("lists chiasmus_review in available tools", async () => {
+      const tools = await client.listTools();
+      const names = tools.tools.map((t) => t.name);
+      expect(names).toContain("chiasmus_review");
+    });
+
+    it("returns a plan with phases, templates, and reporting for a 'full' review", async () => {
+      const result = await client.callTool({
+        name: "chiasmus_review",
+        arguments: {
+          files: ["/abs/src/handler.ts", "/abs/src/db.ts"],
+        },
+      });
+
+      const content = result.content as Array<{ type: string; text: string }>;
+      const parsed = JSON.parse(content[0].text);
+      expect(parsed.focus).toBe("all");
+      expect(Array.isArray(parsed.phases)).toBe(true);
+      expect(parsed.phases.length).toBeGreaterThanOrEqual(6);
+      expect(Array.isArray(parsed.suggestedTemplates)).toBe(true);
+      expect(parsed.suggestedTemplates.length).toBeGreaterThan(0);
+      expect(parsed.reporting).toBeDefined();
+      expect(parsed.reporting.severityLevels).toContain("CRITICAL");
+    });
+
+    it("honors 'quick' focus with fewer phases", async () => {
+      const result = await client.callTool({
+        name: "chiasmus_review",
+        arguments: {
+          files: ["/abs/src/main.ts"],
+          focus: "quick",
+        },
+      });
+
+      const content = result.content as Array<{ type: string; text: string }>;
+      const parsed = JSON.parse(content[0].text);
+      expect(parsed.focus).toBe("quick");
+      expect(parsed.phases.length).toBeLessThanOrEqual(3);
+    });
+
+    it("'security' focus includes a chiasmus_formalize action for taint-propagation", async () => {
+      const result = await client.callTool({
+        name: "chiasmus_review",
+        arguments: {
+          files: ["/abs/src/server.ts"],
+          focus: "security",
+        },
+      });
+
+      const content = result.content as Array<{ type: string; text: string }>;
+      const parsed = JSON.parse(content[0].text);
+      const formalizeActions: Array<{ tool: string }> = [];
+      for (const phase of parsed.phases) {
+        for (const action of phase.actions) {
+          if (action.tool === "chiasmus_formalize") formalizeActions.push(action);
+        }
+      }
+      expect(formalizeActions.length).toBeGreaterThan(0);
+      expect(
+        parsed.suggestedTemplates.some(
+          (t: { template: string }) => t.template === "taint-propagation",
+        ),
+      ).toBe(true);
+    });
+
+    it("passes entry_points through to the dead-code action", async () => {
+      const result = await client.callTool({
+        name: "chiasmus_review",
+        arguments: {
+          files: ["/abs/src/main.ts"],
+          focus: "architecture",
+          entry_points: ["main", "bootstrap"],
+        },
+      });
+
+      const content = result.content as Array<{ type: string; text: string }>;
+      const parsed = JSON.parse(content[0].text);
+      const deadCodeAction = parsed.phases
+        .flatMap((p: { actions: Array<{ tool: string; args: Record<string, unknown> }> }) => p.actions)
+        .find(
+          (a: { tool: string; args: Record<string, unknown> }) =>
+            a.tool === "chiasmus_graph" && a.args.analysis === "dead-code",
+        );
+      expect(deadCodeAction).toBeDefined();
+      expect(deadCodeAction.args.entry_points).toEqual(["main", "bootstrap"]);
+    });
+
+    it("returns structured error for empty files array", async () => {
+      const result = await client.callTool({
+        name: "chiasmus_review",
+        arguments: { files: [] },
+      });
+
+      const content = result.content as Array<{ type: string; text: string }>;
+      const parsed = JSON.parse(content[0].text);
+      expect(parsed.error).toMatch(/files/i);
+    });
+
+    it("returns structured error for unknown focus value", async () => {
+      const result = await client.callTool({
+        name: "chiasmus_review",
+        arguments: {
+          files: ["/abs/src/a.ts"],
+          focus: "nonsense",
+        },
+      });
+
+      const content = result.content as Array<{ type: string; text: string }>;
+      const parsed = JSON.parse(content[0].text);
+      expect(parsed.error).toMatch(/focus/i);
     });
   });
 

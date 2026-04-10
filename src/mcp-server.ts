@@ -24,6 +24,8 @@ import type { AnalysisType } from "./graph/analyses.js";
 import { craftTemplate } from "./skills/craft.js";
 import { parseMermaid } from "./graph/mermaid.js";
 import type { CraftInput } from "./skills/craft.js";
+import { buildReviewPlan } from "./review.js";
+import type { ReviewFocus } from "./review.js";
 
 export function getChiasmusHome(): string {
   return process.env.CHIASMUS_HOME ?? join(homedir(), ".chiasmus");
@@ -231,6 +233,7 @@ ANALYSES:
   cycles       — circular call dependencies
   path         — call chain from→to (needs from, to)
   impact       — what breaks if target changes? (needs target)
+  layer-violation — calls that skip abstraction layers (handlers→db without going through services)
   facts        — raw Prolog facts for custom queries via chiasmus_verify`,
     inputSchema: {
       type: "object" as const,
@@ -242,7 +245,7 @@ ANALYSES:
         },
         analysis: {
           type: "string",
-          enum: ["summary", "callers", "callees", "reachability", "dead-code", "cycles", "path", "impact", "facts"],
+          enum: ["summary", "callers", "callees", "reachability", "dead-code", "cycles", "path", "impact", "layer-violation", "facts"],
           description: "Which analysis to run",
         },
         target: {
@@ -340,6 +343,48 @@ Optional: set test=true with an example to run it through the solver.`,
         },
       },
       required: ["name", "domain", "solver", "signature", "skeleton", "slots", "normalizations"],
+    },
+  },
+  {
+    name: "chiasmus_review",
+    description: `Return a phased code-review recipe — which chiasmus tools and templates to run, in what order, and what to look for.
+
+Output is a structured plan (no side effects, no solver calls). Execute phases in order:
+each action names a tool + args + 'interpret' guidance. Skip phases not applicable to the codebase.
+
+FOCUS:
+  all           — full review (structural → architecture → security → resource → auth → correctness → impact)
+  quick         — structural overview + architecture health only
+  architecture  — dead code, cycles, layer violations, impact
+  security      — taint flow, resource pairing, auth contradictions
+  correctness   — invariants, boundaries, state machines, impact
+
+WORKFLOW:
+  1. Call chiasmus_review with files + focus → get the plan
+  2. Execute each phase's actions in order using the named tools
+  3. After all phases, produce a numbered issue list with severity per the reporting section
+
+Entry points (for dead-code phase) are optional — chiasmus_graph auto-detects exports if omitted.`,
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        files: {
+          type: "array",
+          items: { type: "string" },
+          description: "Absolute file paths to review",
+        },
+        focus: {
+          type: "string",
+          enum: ["all", "security", "architecture", "correctness", "quick"],
+          description: "Which aspects to emphasize (default: 'all')",
+        },
+        entry_points: {
+          type: "array",
+          items: { type: "string" },
+          description: "Optional entry point function names for dead-code analysis",
+        },
+      },
+      required: ["files"],
     },
   },
 ];
@@ -666,7 +711,7 @@ function handleLint(args: Record<string, unknown>): CallToolResult {
   };
 }
 
-const VALID_ANALYSES = ["summary", "callers", "callees", "reachability", "dead-code", "cycles", "path", "impact", "facts"];
+const VALID_ANALYSES = ["summary", "callers", "callees", "reachability", "dead-code", "cycles", "path", "impact", "layer-violation", "facts"];
 
 async function handleGraph(args: Record<string, unknown>): Promise<CallToolResult> {
   const files = args.files;
@@ -698,6 +743,43 @@ async function handleGraph(args: Record<string, unknown>): Promise<CallToolResul
     });
     return {
       content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+    };
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return {
+      content: [{ type: "text", text: JSON.stringify({ error: msg }) }],
+    };
+  }
+}
+
+function handleReview(args: Record<string, unknown>): CallToolResult {
+  const files = args.files;
+  if (!Array.isArray(files) || files.length === 0) {
+    return {
+      content: [{ type: "text", text: JSON.stringify({
+        error: "'files' (non-empty string[]) is required",
+      }) }],
+    };
+  }
+  if (files.some((f) => typeof f !== "string")) {
+    return {
+      content: [{ type: "text", text: JSON.stringify({
+        error: "'files' must contain only strings",
+      }) }],
+    };
+  }
+
+  const focus = args.focus as ReviewFocus | undefined;
+  const entryPoints = args.entry_points as string[] | undefined;
+
+  try {
+    const plan = buildReviewPlan({
+      files: files as string[],
+      focus,
+      entry_points: entryPoints,
+    });
+    return {
+      content: [{ type: "text", text: JSON.stringify(plan, null, 2) }],
     };
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -780,6 +862,8 @@ export async function createChiasmusServer(
         return handleGraph(args ?? {});
       case "chiasmus_craft":
         return handleCraft(library, args ?? {});
+      case "chiasmus_review":
+        return handleReview(args ?? {});
       default:
         return {
           content: [

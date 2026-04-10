@@ -14,3 +14,6 @@ export type { SearchOptions, CraftInput, CraftResult, SkillTemplate, SlotDef, No
 
 export { createLLMFromEnv, AnthropicAdapter, OpenAICompatibleAdapter } from "./llm/index.js";
 export type { AnthropicConfig, OpenAICompatibleConfig, LLMAdapter, LLMMessage } from "./llm/index.js";
+
+export { buildReviewPlan } from "./review.js";
+export type { ReviewFocus, ReviewRequest, ReviewAction, ReviewPhase, ReviewPlan, SuggestedTemplate, ReviewReporting } from "./review.js";
