@@ -1,37 +1,41 @@
 {
   "name": "chiasmus",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "type": "module",
   "description": "Neurosymbolic verification engine - MCP server for formal reasoning with Z3 and Tau Prolog",
-  "main": "dist/mcp-server.js",
-  "types": "dist/mcp-server.d.ts",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "bin": {
     "chiasmus": "dist/mcp-server.js"
   },
   "exports": {
     ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./mcp": {
       "types": "./dist/mcp-server.d.ts",
       "default": "./dist/mcp-server.js"
     },
     "./solvers": {
-      "types": "./dist/solvers/types.d.ts",
-      "default": "./dist/solvers/types.js"
+      "types": "./dist/solvers/index.d.ts",
+      "default": "./dist/solvers/index.js"
     },
-    "./skills": {
-      "types": "./dist/skills/types.d.ts",
-      "default": "./dist/skills/types.js"
+    "./graph": {
+      "types": "./dist/graph/index.d.ts",
+      "default": "./dist/graph/index.js"
     },
     "./formalize": {
-      "types": "./dist/formalize/engine.d.ts",
-      "default": "./dist/formalize/engine.js"
+      "types": "./dist/formalize/index.d.ts",
+      "default": "./dist/formalize/index.js"
+    },
+    "./skills": {
+      "types": "./dist/skills/index.d.ts",
+      "default": "./dist/skills/index.js"
     },
     "./llm": {
-      "types": "./dist/llm/types.d.ts",
-      "default": "./dist/llm/types.js"
-    },
-    "./adapter": {
-      "types": "./dist/graph/types.d.ts",
-      "default": "./dist/graph/adapter-registry.js"
+      "types": "./dist/llm/index.d.ts",
+      "default": "./dist/llm/index.js"
     }
   },
   "files": [
