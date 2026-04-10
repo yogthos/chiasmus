@@ -1,6 +1,7 @@
 import type { LLMAdapter, LLMMessage } from "./types.js";
 
 const DEFAULT_MAX_TOKENS = 4096;
+const DEFAULT_TIMEOUT_MS = 30_000;
 
 export interface OpenAICompatibleConfig {
   apiKey: string;
@@ -47,6 +48,7 @@ export class OpenAICompatibleAdapter implements LLMAdapter {
         Authorization: `Bearer ${this.apiKey}`,
       },
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
     });
 
     if (!response.ok) {

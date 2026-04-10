@@ -2,7 +2,7 @@ import Database from "better-sqlite3";
 import { join } from "node:path";
 import { mkdirSync } from "node:fs";
 import { STARTER_TEMPLATES } from "./starters.js";
-import { buildIndex, search } from "./bm25.js";
+import { buildIndex, addToIndex, search } from "./bm25.js";
 import type { BM25Index } from "./bm25.js";
 import type {
   SkillTemplate,
@@ -24,6 +24,7 @@ export class SkillLibrary {
   private templates: Map<string, SkillTemplate>;
   private searchIndex: BM25Index;
   private templateOrder: string[]; // maps BM25 doc index to template name
+  private metadataCache: Map<string, SkillMetadata>;
 
   private constructor(db: Database.Database, templates: Map<string, SkillTemplate>) {
     this.db = db;
@@ -42,6 +43,19 @@ export class SkillLibrary {
       ].join(" ");
     });
     this.searchIndex = buildIndex(searchTexts);
+
+    // Batch-load all metadata into memory
+    this.metadataCache = new Map();
+    const rows = db.prepare("SELECT * FROM skill_metadata").all() as any[];
+    for (const row of rows) {
+      this.metadataCache.set(row.name, {
+        name: row.name,
+        reuseCount: row.reuse_count,
+        successCount: row.success_count,
+        lastUsed: row.last_used,
+        promoted: !!row.promoted,
+      });
+    }
   }
 
   static async create(basePath: string): Promise<SkillLibrary> {
@@ -134,6 +148,13 @@ export class SkillLibrary {
          WHERE name = ?`
       )
       .run(success ? 1 : 0, name);
+
+    const existing = this.metadataCache.get(name);
+    if (existing) {
+      existing.reuseCount++;
+      if (success) existing.successCount++;
+      existing.lastUsed = new Date().toISOString();
+    }
   }
 
   /** Get metadata for a template */
@@ -144,7 +165,7 @@ export class SkillLibrary {
   /** Add a learned (candidate) template to the library. Returns false if name already exists. */
   addLearned(template: SkillTemplate): boolean {
     if (this.templates.has(template.name)) {
-      return false; // don't overwrite existing templates
+      return false;
     }
 
     this.templates.set(template.name, template);
@@ -157,7 +178,27 @@ export class SkillLibrary {
       )
       .run(template.name);
 
-    this.rebuildSearchIndex();
+    if (!this.metadataCache.has(template.name)) {
+      this.metadataCache.set(template.name, {
+        name: template.name,
+        reuseCount: 0,
+        successCount: 0,
+        lastUsed: null,
+        promoted: false,
+      });
+    }
+
+    // Incrementally add to search index
+    this.templateOrder.push(template.name);
+    const searchText = [
+      template.name,
+      template.domain,
+      template.signature,
+      ...template.slots.map((s) => s.description),
+      ...template.normalizations.map((n) => `${n.source} ${n.transform}`),
+    ].join(" ");
+    addToIndex(this.searchIndex, searchText);
+
     return true;
   }
 
@@ -166,11 +207,17 @@ export class SkillLibrary {
     this.db
       .prepare("UPDATE skill_metadata SET promoted = 1 WHERE name = ?")
       .run(name);
+
+    const existing = this.metadataCache.get(name);
+    if (existing) {
+      existing.promoted = true;
+    }
   }
 
   /** Remove a template from the library */
   remove(name: string): void {
     this.templates.delete(name);
+    this.metadataCache.delete(name);
     this.db.prepare("DELETE FROM skill_metadata WHERE name = ?").run(name);
     this.rebuildSearchIndex();
   }
@@ -196,26 +243,12 @@ export class SkillLibrary {
   }
 
   private loadMetadata(name: string): SkillMetadata {
-    const row = this.db
-      .prepare("SELECT * FROM skill_metadata WHERE name = ?")
-      .get(name) as any;
-
-    if (!row) {
-      return {
-        name,
-        reuseCount: 0,
-        successCount: 0,
-        lastUsed: null,
-        promoted: false,
-      };
-    }
-
-    return {
-      name: row.name,
-      reuseCount: row.reuse_count,
-      successCount: row.success_count,
-      lastUsed: row.last_used,
-      promoted: !!row.promoted,
+    return this.metadataCache.get(name) ?? {
+      name,
+      reuseCount: 0,
+      successCount: 0,
+      lastUsed: null,
+      promoted: false,
     };
   }
 }
