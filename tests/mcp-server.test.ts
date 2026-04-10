@@ -246,7 +246,7 @@ describe("Chiasmus MCP Server", () => {
       const content = result.content as Array<{ type: string; text: string }>;
       const parsed = JSON.parse(content[0].text);
       expect(Array.isArray(parsed)).toBe(true);
-      expect(parsed.length).toBe(8); // 5 Z3 + 3 Prolog starters
+      expect(parsed.length).toBe(14); // 8 Z3 + 6 Prolog templates
     });
 
     it("filters by solver type", async () => {
@@ -260,7 +260,7 @@ describe("Chiasmus MCP Server", () => {
       const content = result.content as Array<{ type: string; text: string }>;
       const parsed = JSON.parse(content[0].text);
       expect(Array.isArray(parsed)).toBe(true);
-      expect(parsed.length).toBe(3);
+      expect(parsed.length).toBe(6);
       for (const item of parsed) {
         expect(item.template.solver).toBe("prolog");
       }

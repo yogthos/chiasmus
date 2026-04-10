@@ -231,6 +231,7 @@ ANALYSES:
   cycles       — circular call dependencies
   path         — call chain from→to (needs from, to)
   impact       — what breaks if target changes? (needs target)
+  layer-violation — calls that skip abstraction layers (handlers→db without going through services)
   facts        — raw Prolog facts for custom queries via chiasmus_verify`,
     inputSchema: {
       type: "object" as const,
@@ -242,7 +243,7 @@ ANALYSES:
         },
         analysis: {
           type: "string",
-          enum: ["summary", "callers", "callees", "reachability", "dead-code", "cycles", "path", "impact", "facts"],
+          enum: ["summary", "callers", "callees", "reachability", "dead-code", "cycles", "path", "impact", "layer-violation", "facts"],
           description: "Which analysis to run",
         },
         target: {
@@ -666,7 +667,7 @@ function handleLint(args: Record<string, unknown>): CallToolResult {
   };
 }
 
-const VALID_ANALYSES = ["summary", "callers", "callees", "reachability", "dead-code", "cycles", "path", "impact", "facts"];
+const VALID_ANALYSES = ["summary", "callers", "callees", "reachability", "dead-code", "cycles", "path", "impact", "layer-violation", "facts"];
 
 async function handleGraph(args: Record<string, unknown>): Promise<CallToolResult> {
   const files = args.files;
