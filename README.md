@@ -11,6 +11,7 @@ MCP server that gives LLMs access to formal verification via Z3 (SMT solver) and
 - **"Does our workflow have dead-end or unreachable states?"** → Prolog checks reachability from the initial state, identifies orphaned and terminal nodes
 - **"What's the dead code in this module?"** → tree-sitter parses source files, Prolog finds functions unreachable from any entry point
 - **"What breaks if I change this function?"** → call graph impact analysis shows all transitive callers
+- **"Do a full code review of these files"** → `chiasmus_review` returns a phased recipe of graph analyses + verification templates, and you execute it step-by-step
 
 ## Setup
 
@@ -141,6 +142,29 @@ chiasmus_craft name="api-rate-limit" domain="configuration" solver="z3"
 ```
 
 After creation, the template appears in `chiasmus_skills` searches and `chiasmus_formalize`.
+
+**`chiasmus_review`** — Returns a phased code-review recipe: which chiasmus tools and templates to run, in what order, and what to look for. No side effects — pure scaffolding. Execute phases sequentially using the named tools, then produce a final report per the `reporting` section.
+
+```
+chiasmus_review files=["src/handler.ts", "src/db.ts"] focus="all"
+→ {
+    phases: [
+      { phase: "1. Structural overview", actions: [{tool: "chiasmus_graph", args: {analysis: "summary"}, interpret: "..."}] },
+      { phase: "2. Architecture health", actions: [dead-code, cycles, layer-violation] },
+      { phase: "3. Security — data flow and taint", actions: [facts + chiasmus_formalize taint-propagation] },
+      { phase: "4. Resource safety", actions: [association-rule-check] },
+      { phase: "5. Authorization", actions: [policy-contradiction] },
+      { phase: "6. Correctness — invariants, boundaries, state machines", actions: [...] },
+      { phase: "7. Impact analysis on flagged functions", actions: [chiasmus_graph impact] },
+    ],
+    suggestedTemplates: [...],
+    reporting: { format: "Numbered issue list with severity", severityLevels: ["CRITICAL","HIGH","MEDIUM","LOW","INFO"] }
+  }
+```
+
+Focus modes subset the phases: `all` (default, 7 phases), `quick` (overview + architecture), `architecture` (structural defects + impact), `security` (taint + resource pairing + auth), `correctness` (invariants + boundaries + state machines).
+
+Each action carries an `interpret` field describing how to score the result. After all phases, emit a numbered issue list with severity labels and file:line references.
 
 **`chiasmus_learn`** — Extract a reusable template from a verified solution. Candidates get promoted after 3+ successful reuses.
 
