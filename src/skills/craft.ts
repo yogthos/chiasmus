@@ -2,6 +2,7 @@ import type { SkillTemplate, SlotDef, Normalization } from "./types.js";
 import type { SkillLibrary } from "./library.js";
 import type { SolverType } from "../solvers/types.js";
 import { SolverSession } from "../solvers/session.js";
+import { extractPrologQuery } from "../formalize/prolog-input.js";
 
 export interface CraftInput {
   name: string;
@@ -160,18 +161,6 @@ export async function craftTemplate(
 }
 
 function buildPrologInput(example: string) {
-  const lines = example.split("\n");
-  let program = example;
-  let query = "true.";
-
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const trimmed = lines[i].trim();
-    if (trimmed.startsWith("?-")) {
-      query = trimmed.replace(/^\?\-\s*/, "");
-      program = lines.slice(0, i).join("\n").trim();
-      break;
-    }
-  }
-
+  const { program, query } = extractPrologQuery(example);
   return { type: "prolog" as const, program, query };
 }

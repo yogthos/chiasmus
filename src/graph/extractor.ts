@@ -10,9 +10,8 @@ export async function extractGraph(files: Array<{ path: string; content: string 
   const exports: ExportsFact[] = [];
   const contains: ContainsFact[] = [];
 
-  const callSet = new Set<string>(); // deduplicate caller→callee
-
   for (const file of files) {
+    const callSet = new Set<string>(); // deduplicate caller→callee per file
     const lang = getLanguageForFile(file.path);
     if (!lang) continue;
 
@@ -97,13 +96,17 @@ function walkNode(
       const name = node.childForFieldName("name")?.text;
       if (name) {
         defines.push({ file: filePath, name, kind: "class", line: node.startPosition.row + 1 });
+        scopeStack.push(name);
+        walkChildren(node, filePath, language, scopeStack, defines, calls, imports, exports, contains, callSet);
+        scopeStack.pop();
+        return;
       }
-      break; // fall through to walk children
+      break;
     }
 
     case "lexical_declaration":
     case "variable_declaration": {
-      // Look for arrow functions: const foo = () => { ... }
+      let foundArrow = false;
       for (let i = 0; i < node.childCount; i++) {
         const child = node.child(i);
         if (child.type === "variable_declarator") {
@@ -115,10 +118,13 @@ function walkNode(
             scopeStack.push(name);
             walkChildren(valueNode, filePath, language, scopeStack, defines, calls, imports, exports, contains, callSet);
             scopeStack.pop();
-            return; // already walked
+            foundArrow = true;
+          } else if (valueNode) {
+            walkChildren(child, filePath, language, scopeStack, defines, calls, imports, exports, contains, callSet);
           }
         }
       }
+      if (foundArrow) return;
       break;
     }
 
@@ -312,12 +318,12 @@ function extractStringContent(node: any): string | null {
       return child.text;
     }
   }
-  // Fallback: strip quotes from the full text
+  // Fallback: strip quotes/backticks from the full text
   const text = node.text;
-  if ((text.startsWith("'") && text.endsWith("'")) || (text.startsWith('"') && text.endsWith('"'))) {
+  if ((text.startsWith("'") && text.endsWith("'")) || (text.startsWith('"') && text.endsWith('"')) || (text.startsWith("`") && text.endsWith("`"))) {
     return text.slice(1, -1);
   }
-  return text;
+  return null;
 }
 
 // ── Python extraction ───────────────────────────────────────────────
@@ -366,7 +372,7 @@ function walkPython(
     }
 
     case "decorated_definition": {
-      // Walk into the actual definition inside the decorator
+      // Falls through to walkPythonChildren to process the definition inside
       break;
     }
 
@@ -804,7 +810,7 @@ function walkClojure(
     if (!defn) continue;
 
     // Walk the body looking for call sites (list_lit starting with sym_lit)
-    cljExtractCalls(child, defn.name, calls, callSet, defnNames);
+    cljExtractCalls(child, defn.name, calls, callSet);
   }
 }
 
@@ -814,7 +820,6 @@ function cljExtractCalls(
   enclosingFn: string,
   calls: CallsFact[],
   callSet: Set<string>,
-  skipSelf: Set<string> | null,
 ): void {
   for (let i = 0; i < node.childCount; i++) {
     const child = node.child(i);
@@ -838,8 +843,10 @@ function cljExtractCalls(
           break;
         }
       }
-      // Recurse into nested forms
-      cljExtractCalls(child, enclosingFn, calls, callSet, skipSelf);
+    }
+    // Recurse into nested forms (list, vec, map, set)
+    if (child.type === "list_lit" || child.type === "vec_lit" || child.type === "map_lit" || child.type === "set_lit") {
+      cljExtractCalls(child, enclosingFn, calls, callSet);
     }
   }
 }

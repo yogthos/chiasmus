@@ -11,8 +11,6 @@ function getZ3() {
   return z3Promise;
 }
 
-const SOLVER_TIMEOUT_MS = 30_000;
-
 /** Strip commands that we handle ourselves to avoid conflicts */
 function sanitizeSmtlib(input: string): string {
   return input
@@ -53,13 +51,7 @@ export async function createZ3Solver(): Promise<Solver> {
 
       let checkResult: string;
       try {
-        const check = solver.check();
-        let timer: ReturnType<typeof setTimeout>;
-        const timeout = new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(new Error("solver timed out")), SOLVER_TIMEOUT_MS);
-        });
-        checkResult = await Promise.race([check, timeout]);
-        clearTimeout(timer!);
+        checkResult = await solver.check();
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : String(e);
         return { status: "error", error: msg };

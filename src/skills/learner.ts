@@ -90,7 +90,9 @@ Extract a reusable template from this verified solution.`,
     }
 
     // Add to library as candidate (not promoted)
-    this.library.addLearned(template);
+    if (!this.library.addLearned(template)) {
+      return null;
+    }
     return template;
   }
 

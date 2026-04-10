@@ -6,6 +6,7 @@ import { correctionLoop } from "../solvers/correction-loop.js";
 import type { CorrectionAttempt } from "../solvers/correction-loop.js";
 import { lintSpec } from "./validate.js";
 import { classifyFeedback } from "./feedback.js";
+import { extractPrologQuery } from "./prolog-input.js";
 
 /** Result of formalize() — template + instructions for the calling LLM */
 export interface FormalizeResult {
@@ -51,11 +52,16 @@ export class FormalizationEngine {
    * Formalize a problem: select a template and return it with
    * fill instructions. Does NOT execute or call the LLM for filling.
    */
-  async formalize(problem: string): Promise<FormalizeResult> {
+  async formalize(problem: string): Promise<FormalizeResult | null> {
     const results = this.library.search(problem, { limit: 1 });
-    const template = results.length > 0
-      ? results[0].template
-      : this.library.list()[0].template; // fallback to first template
+    let template: SkillTemplate | null = null;
+    if (results.length > 0) {
+      template = results[0].template;
+    } else {
+      const fallback = this.library.list()[0];
+      if (fallback) template = fallback.template;
+    }
+    if (!template) return null;
 
     const instructions = this.buildInstructions(problem, template);
     return { template, instructions };
@@ -66,7 +72,18 @@ export class FormalizationEngine {
    * submit to solver with correction loop.
    */
   async solve(problem: string, maxRounds = 5): Promise<SolveResult> {
-    const { template } = await this.formalize(problem);
+    const formalized = await this.formalize(problem);
+    if (!formalized) {
+      return {
+        result: { status: "error", error: "No matching template found in the skill library" },
+        converged: false,
+        rounds: 0,
+        history: [],
+        templateUsed: null,
+        answers: [],
+      };
+    }
+    const { template } = formalized;
 
     // Ask LLM to fill the template
     let filledSpec = await this.llmFill(problem, template);
@@ -184,20 +201,7 @@ Fix the specification and return only the corrected version.`,
       return { type: "z3", smtlib: spec };
     }
 
-    // For Prolog, extract ?- query from the last line that starts with ?-
-    const lines = spec.split("\n");
-    let program = spec;
-    let query = "true.";
-
-    for (let i = lines.length - 1; i >= 0; i--) {
-      const trimmed = lines[i].trim();
-      if (trimmed.startsWith("?-")) {
-        query = trimmed.replace(/^\?\-\s*/, "");
-        program = lines.slice(0, i).join("\n").trim();
-        break;
-      }
-    }
-
+    const { program, query } = extractPrologQuery(spec);
     return { type: "prolog", program, query };
   }
 

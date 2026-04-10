@@ -401,7 +401,9 @@ async function handleVerify(args: Record<string, unknown>): Promise<CallToolResu
         try {
           const results: SolverResult[] = [];
           for (const q of queries) {
-            results.push(await session.solve({ type: "prolog", program: input, query: q as string, explain: explain ?? false }));
+            const r = await session.solve({ type: "prolog", program: input, query: q as string, explain: explain ?? false });
+            results.push(r);
+            if (r.status === "error") break;
           }
           return {
             content: [{ type: "text", text: JSON.stringify(results, null, 2) }],
@@ -498,6 +500,11 @@ async function handleFormalize(
   const problem = args.problem;
 
   const result = await formalizer.formalize(problem);
+  if (!result) {
+    return {
+      content: [{ type: "text", text: JSON.stringify({ error: "No matching template found in the skill library" }) }],
+    };
+  }
   const suggestions = library.getRelated(result.template.name);
   return {
     content: [{
@@ -531,6 +538,11 @@ async function handleSolve(
       async complete() { return ""; },
     });
     const result = await dummyEngine.formalize(problem);
+    if (!result) {
+      return {
+        content: [{ type: "text", text: JSON.stringify({ error: "No matching template found in the skill library" }) }],
+      };
+    }
     return {
       content: [{
         type: "text",
