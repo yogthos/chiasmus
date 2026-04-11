@@ -749,8 +749,10 @@ async function handleGraph(args: Record<string, unknown>): Promise<CallToolResul
       to: args.to as string | undefined,
       entryPoints: args.entry_points as string[] | undefined,
     });
+    // Compact JSON: pretty-printing doubled payload size for no benefit and
+    // large graph analyses hit MCP stdio transport limits.
     return {
-      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      content: [{ type: "text", text: JSON.stringify(result) }],
     };
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);

@@ -1,17 +1,59 @@
 import { readFileSync, statSync } from "node:fs";
 import { extractGraph } from "./extractor.js";
-import { graphToProlog, escapeAtom } from "./facts.js";
-import { createPrologSolver } from "../solvers/prolog-solver.js";
-import type { SolverResult, PrologAnswer } from "../solvers/types.js";
+import { graphToProlog } from "./facts.js";
+import {
+  cycles as nativeCycles,
+  reachability as nativeReachability,
+  path as nativePath,
+  impact as nativeImpact,
+  deadCode as nativeDeadCode,
+  callers as nativeCallers,
+  callees as nativeCallees,
+} from "./native-analyses.js";
 import type { CodeGraph } from "./types.js";
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 
-// Graph analyses run system-generated Prolog (not user input) and walk
-// cycle-safe reachability rules that are O(n²) per step. The default
-// 100 000 inference budget gets exhausted on mid-size codebases (a few
-// hundred functions), so we raise it for analyses.
-const GRAPH_MAX_INFERENCES = 5_000_000;
+/**
+ * Maximum byte size of a `facts` analysis response. Above this the Prolog
+ * program dump is refused and an error object is returned instead, because
+ * MCP stdio transport + JSON serialization chokes on multi-megabyte strings.
+ * Keep this aligned with MAX_FILE_SIZE so a single huge file can't
+ * single-handedly exceed it, and with the "10 MB is fine" agreed budget.
+ */
+export const DEFAULT_FACTS_MAX_BYTES = 10 * 1024 * 1024;
+
+/** Shape returned when the facts program exceeds the configured cap. */
+export interface FactsOversizeError {
+  error: string;
+  size: number;
+  limit: number;
+}
+
+/**
+ * Build the facts analysis result, enforcing a size cap. Returns the raw
+ * Prolog program string if under the cap, otherwise a structured error so
+ * callers (and the MCP transport) can surface a clear failure instead of
+ * timing out mid-serialize.
+ */
+export function buildFactsResult(
+  graph: CodeGraph,
+  entryPoints: string[] | undefined,
+  maxBytes: number = DEFAULT_FACTS_MAX_BYTES,
+): string | FactsOversizeError {
+  const program = graphToProlog(graph, entryPoints);
+  if (program.length > maxBytes) {
+    return {
+      error:
+        `Prolog fact dump is ${program.length} bytes, exceeds the ${maxBytes} byte cap. ` +
+        "Narrow the file set, or run a specific analysis (cycles, impact, callers, etc.) " +
+        "directly instead of exporting raw facts.",
+      size: program.length,
+      limit: maxBytes,
+    };
+  }
+  return program;
+}
 
 export type AnalysisType =
   | "summary" | "callers" | "callees" | "reachability"
@@ -79,42 +121,64 @@ export async function runAnalysisFromGraph(
   return runOnGraph(graph, request);
 }
 
-/** Core analysis pipeline — shared by runAnalysis and runAnalysisFromGraph. */
+/**
+ * Core analysis pipeline — shared by runAnalysis and runAnalysisFromGraph.
+ *
+ * Reachability-heavy analyses (cycles, reachability, path, impact,
+ * dead-code, callers, callees) run through native O(V+E) algorithms in
+ * native-analyses.ts. The Prolog rule set is still emitted by
+ * graphToProlog so `facts` output remains usable with chiasmus_verify.
+ */
 async function runOnGraph(
   graph: CodeGraph,
   request: AnalysisRequest,
 ): Promise<AnalysisResult> {
-  const program = graphToProlog(graph, request.entryPoints);
+  switch (request.analysis) {
+    case "facts":
+      return { analysis: "facts", result: buildFactsResult(graph, request.entryPoints) };
 
-  if (request.analysis === "facts") {
-    return { analysis: "facts", result: program };
-  }
+    case "summary":
+      return { analysis: "summary", result: buildSummary(graph) };
 
-  if (request.analysis === "summary") {
-    return { analysis: "summary", result: buildSummary(graph) };
-  }
+    case "layer-violation":
+      return { analysis: "layer-violation", result: findLayerViolations(graph) };
 
-  if (request.analysis === "layer-violation") {
-    return { analysis: "layer-violation", result: findLayerViolations(graph) };
-  }
+    case "callers":
+      if (!request.target) return missingParams("callers");
+      return { analysis: "callers", result: nativeCallers(graph, request.target) };
 
-  const query = buildQuery(request);
-  if (!query) {
-    return { analysis: request.analysis, result: { error: "Missing required parameters" } };
-  }
+    case "callees":
+      if (!request.target) return missingParams("callees");
+      return { analysis: "callees", result: nativeCallees(graph, request.target) };
 
-  const solver = createPrologSolver();
-  try {
-    const solverResult = await solver.solve({
-      type: "prolog",
-      program,
-      query,
-      maxInferences: GRAPH_MAX_INFERENCES,
-    });
-    return { analysis: request.analysis, result: formatResult(request.analysis, solverResult) };
-  } finally {
-    solver.dispose();
+    case "reachability":
+      if (!request.from || !request.to) return missingParams("reachability");
+      return {
+        analysis: "reachability",
+        result: { reachable: nativeReachability(graph, request.from, request.to) },
+      };
+
+    case "dead-code":
+      return { analysis: "dead-code", result: nativeDeadCode(graph, request.entryPoints) };
+
+    case "cycles":
+      return { analysis: "cycles", result: nativeCycles(graph) };
+
+    case "path":
+      if (!request.from || !request.to) return missingParams("path");
+      return { analysis: "path", result: { paths: nativePath(graph, request.from, request.to) } };
+
+    case "impact":
+      if (!request.target) return missingParams("impact");
+      return { analysis: "impact", result: nativeImpact(graph, request.target) };
+
+    default:
+      return { analysis: request.analysis, result: { error: `Unknown analysis: ${request.analysis}` } };
   }
+}
+
+function missingParams(analysis: AnalysisType): AnalysisResult {
+  return { analysis, result: { error: "Missing required parameters" } };
 }
 
 const LAYER_ORDER: Record<string, number> = {
@@ -187,88 +251,3 @@ function buildSummary(graph: CodeGraph) {
   };
 }
 
-function buildQuery(request: AnalysisRequest): string | null {
-  switch (request.analysis) {
-    case "callers":
-      if (!request.target) return null;
-      return `caller_of(${escapeAtom(request.target)}, X).`;
-
-    case "callees":
-      if (!request.target) return null;
-      return `callee_of(${escapeAtom(request.target)}, X).`;
-
-    case "reachability":
-      if (!request.from || !request.to) return null;
-      return `reaches(${escapeAtom(request.from)}, ${escapeAtom(request.to)}).`;
-
-    case "dead-code":
-      return "dead(X).";
-
-    case "cycles":
-      return "func_reaches(X, X).";
-
-    case "path":
-      if (!request.from || !request.to) return null;
-      return `path(${escapeAtom(request.from)}, ${escapeAtom(request.to)}, Path).`;
-
-    case "impact":
-      if (!request.target) return null;
-      return `reaches(X, ${escapeAtom(request.target)}).`;
-
-    default:
-      return null;
-  }
-}
-
-function formatResult(analysis: AnalysisType, solverResult: SolverResult): unknown {
-  if (solverResult.status === "error") {
-    return { error: solverResult.error };
-  }
-
-  if (solverResult.status !== "success") {
-    return { error: `Unexpected solver status: ${solverResult.status}` };
-  }
-
-  const answers = solverResult.answers;
-
-  switch (analysis) {
-    case "callers":
-    case "callees":
-    case "dead-code":
-      return extractUniqueValues(answers, "X");
-
-    case "reachability":
-      return { reachable: answers.length > 0 };
-
-    case "cycles": {
-      return extractUniqueValues(answers, "X");
-    }
-
-    case "path": {
-      if (answers.length === 0) return { paths: [] };
-      // Path binding is a Prolog list — parse it
-      return {
-        paths: answers.map((a) => a.bindings.Path ?? a.formatted),
-      };
-    }
-
-    case "impact":
-      return extractUniqueValues(answers, "X");
-
-    default:
-      return answers.map((a) => a.bindings);
-  }
-}
-
-function extractUniqueValues(answers: PrologAnswer[], variable: string): string[] {
-  const seen = new Set<string>();
-  const result: string[] = [];
-  for (const a of answers) {
-    const val = a.bindings[variable];
-    if (val && !seen.has(val)) {
-      seen.add(val);
-      result.push(val);
-    }
-  }
-  return result;
-}
