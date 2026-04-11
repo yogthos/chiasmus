@@ -710,33 +710,6 @@ function cljSymName(node: any): string | null {
   return null;
 }
 
-/** Check if a list_lit is a (defn ...) or (defn- ...) form */
-function cljDefnName(listNode: any): { name: string; private: boolean } | null {
-  // First child after ( should be sym_lit with sym_name "defn" or "defn-"
-  let symIdx = -1;
-  for (let i = 0; i < listNode.childCount; i++) {
-    const child = listNode.child(i);
-    if (child.type === "sym_lit") {
-      symIdx = i;
-      break;
-    }
-  }
-  if (symIdx < 0) return null;
-
-  const head = cljSymName(listNode.child(symIdx));
-  if (head !== "defn" && head !== "defn-") return null;
-
-  // Next sym_lit is the function name
-  for (let i = symIdx + 1; i < listNode.childCount; i++) {
-    const child = listNode.child(i);
-    if (child.type === "sym_lit") {
-      const name = cljSymName(child);
-      if (name) return { name, private: head === "defn-" };
-    }
-  }
-  return null;
-}
-
 /** Extract ns form: (ns foo.bar (:require [baz.qux :as q] [x.y :refer [z]])) */
 function cljExtractNs(
   listNode: any,
@@ -798,6 +771,110 @@ function cljExtractNs(
   return nsName;
 }
 
+/**
+ * If a list_lit's first significant child is a sym_lit, return its name +
+ * child index; otherwise return null. This is deliberately stricter than
+ * "first sym_lit anywhere" — for keyword-first / map-first / set-first /
+ * list-first lists (e.g. `(:k m)`, `(#{1 2} x)`, `({:a 1} :a)`,
+ * `((comp f g) x)`) there is no symbolic head and we must not treat the
+ * first *later* sym_lit as a callee (which would create bogus edges for
+ * locals like `m`, `x`, `:a`).
+ */
+function cljListHead(listNode: any): { name: string; symIdx: number } | null {
+  for (let i = 0; i < listNode.childCount; i++) {
+    const child = listNode.child(i);
+    if (!CLJ_FORM_TYPES.has(child.type)) continue;
+    if (child.type !== "sym_lit") return null;
+    const name = cljSymName(child);
+    return name ? { name, symIdx: i } : null;
+  }
+  return null;
+}
+
+/** First sym_lit name appearing strictly after a given child index. */
+function cljNextSymNameAfter(listNode: any, afterIdx: number): string | null {
+  for (let i = afterIdx + 1; i < listNode.childCount; i++) {
+    const child = listNode.child(i);
+    if (child.type === "sym_lit") {
+      const name = cljSymName(child);
+      if (name) return name;
+    }
+  }
+  return null;
+}
+
+/** Form-bearing child types (skip parens, whitespace, comments, metadata markers). */
+const CLJ_FORM_TYPES = new Set([
+  "sym_lit", "kwd_lit", "str_lit", "num_lit", "char_lit",
+  "nil_lit", "bool_lit", "list_lit", "map_lit", "vec_lit", "set_lit",
+  "regex_lit", "anon_fn_lit", "tagged_or_ctor_lit", "quoting_lit",
+  "syn_quoting_lit", "derefing_lit", "unquoting_lit",
+  "unquote_splicing_lit", "var_quoting_lit", "read_cond_lit",
+  "splicing_read_cond_lit", "ns_map_lit",
+]);
+
+/**
+ * If `listNode` has the shape `(name [args] body...)` — i.e. its first two
+ * significant children are a sym_lit followed by a vec_lit — return the
+ * method name. Used to recognize protocol method implementations inside
+ * defrecord / deftype / extend-type / extend-protocol bodies, and method
+ * signatures inside defprotocol bodies.
+ */
+function cljMethodImplName(listNode: any): string | null {
+  if (listNode.type !== "list_lit") return null;
+  let name: string | null = null;
+  for (let i = 0; i < listNode.childCount; i++) {
+    const child = listNode.child(i);
+    if (!CLJ_FORM_TYPES.has(child.type)) continue;
+    if (name === null) {
+      if (child.type !== "sym_lit") return null;
+      name = cljSymName(child);
+      if (!name) return null;
+      // A head that's a known special form (defn, let, etc.) is never a
+      // protocol method impl — bail so we don't misclassify stray nested defs.
+      if (CLJ_SPECIAL_FORMS.has(name)) return null;
+    } else {
+      return child.type === "vec_lit" ? name : null;
+    }
+  }
+  return null;
+}
+
+/**
+ * Walk child list_lits of a defrecord / deftype / extend-type /
+ * extend-protocol form, extracting call edges from each method impl body
+ * using the method name as the caller.
+ */
+function cljWalkDispatchMethods(
+  parentList: any,
+  inFileDefns: Set<string>,
+  calls: CallsFact[],
+  callSet: Set<string>,
+): void {
+  for (let i = 0; i < parentList.childCount; i++) {
+    const child = parentList.child(i);
+    if (child.type !== "list_lit") continue;
+    const methodName = cljMethodImplName(child);
+    if (methodName) {
+      cljExtractCalls(child, methodName, inFileDefns, calls, callSet);
+    }
+  }
+}
+
+/**
+ * Top-level forms that walkClojure recognizes by name. Any top-level
+ * list_lit whose head is NOT in this set gets walked as "file-level init"
+ * — its calls are attributed to the namespace name, so patterns like
+ *   (use-fixtures :each my-fixture)
+ *   (def cfg (load-config "x.edn"))
+ * still produce edges instead of silently dropping.
+ */
+const CLJ_RECOGNIZED_TOPLEVEL = new Set([
+  "ns", "defn", "defn-", "defmulti", "defmethod",
+  "defprotocol", "defrecord", "deftype", "definterface",
+  "extend-type", "extend-protocol", "deftest",
+]);
+
 /** Walk a Clojure AST and extract defines, calls, imports */
 function walkClojure(
   rootNode: any,
@@ -808,43 +885,172 @@ function walkClojure(
   exports: ExportsFact[],
   callSet: Set<string>,
 ): void {
-  const defnNames = new Set<string>(); // track defined function names
+  let nsName: string | null = null;
+  const definesBeforePhase1 = defines.length;
 
-  // First pass: collect top-level forms
+  // ── Phase 1: collect top-level definitions ────────────────────────
+  // In addition to defn/defn-, we also register defmulti, defprotocol
+  // (and its declared methods), defrecord, deftype, definterface,
+  // deftest. This ensures the dead-code analysis sees them as known
+  // functions/classes, and the downstream Prolog facts are complete.
   for (let i = 0; i < rootNode.childCount; i++) {
     const child = rootNode.child(i);
     if (child.type !== "list_lit") continue;
 
-    // Check for ns form
-    const nsName = cljExtractNs(child, filePath, imports);
-    if (nsName) continue;
+    // ns form — harvest requires and capture the namespace name for use
+    // as the top-level caller in phase 2.
+    const ns = cljExtractNs(child, filePath, imports);
+    if (ns) {
+      nsName = ns;
+      continue;
+    }
 
-    // Check for defn/defn-
-    const defn = cljDefnName(child);
-    if (defn) {
-      defines.push({
-        file: filePath,
-        name: defn.name,
-        kind: "function",
-        line: child.startPosition.row + 1,
-      });
-      defnNames.add(defn.name);
-      if (!defn.private) {
-        exports.push({ file: filePath, name: defn.name });
+    const head = cljListHead(child);
+    if (!head) continue;
+    const line = child.startPosition.row + 1;
+
+    switch (head.name) {
+      case "defn":
+      case "defn-": {
+        const name = cljNextSymNameAfter(child, head.symIdx);
+        if (!name) break;
+        defines.push({ file: filePath, name, kind: "function", line });
+        if (head.name === "defn") exports.push({ file: filePath, name });
+        break;
+      }
+
+      case "defmulti": {
+        const name = cljNextSymNameAfter(child, head.symIdx);
+        if (!name) break;
+        defines.push({ file: filePath, name, kind: "function", line });
+        exports.push({ file: filePath, name });
+        break;
+      }
+
+      case "defprotocol":
+      case "definterface": {
+        // Both forms share a shape: (head Name (m1 [args] doc?) (m2 ...) ...)
+        const ifaceName = cljNextSymNameAfter(child, head.symIdx);
+        if (ifaceName) {
+          defines.push({ file: filePath, name: ifaceName, kind: "class", line });
+          exports.push({ file: filePath, name: ifaceName });
+        }
+        for (let j = 0; j < child.childCount; j++) {
+          const sub = child.child(j);
+          if (sub.type !== "list_lit") continue;
+          const methodName = cljMethodImplName(sub);
+          if (methodName) {
+            defines.push({
+              file: filePath, name: methodName, kind: "function",
+              line: sub.startPosition.row + 1,
+            });
+            exports.push({ file: filePath, name: methodName });
+          }
+        }
+        break;
+      }
+
+      case "defrecord":
+      case "deftype": {
+        const name = cljNextSymNameAfter(child, head.symIdx);
+        if (!name) break;
+        defines.push({ file: filePath, name, kind: "class", line });
+        exports.push({ file: filePath, name });
+        break;
+      }
+
+      case "deftest": {
+        // (deftest test-name body...) — register as an exported function
+        // so it shows up as an entry point and its body is walked for
+        // calls to helpers / subject code.
+        const name = cljNextSymNameAfter(child, head.symIdx);
+        if (!name) break;
+        defines.push({ file: filePath, name, kind: "function", line });
+        exports.push({ file: filePath, name });
+        break;
       }
     }
   }
 
-  // Second pass: extract calls within each defn body
+  // Snapshot the set of names defined in *this file* during phase 1.
+  // Phase 2's cljExtractCalls uses this to recognize in-file references:
+  // whenever it encounters a sym_lit whose name matches one of these,
+  // it emits a reference edge. This covers user-defined HOFs, map-value
+  // registrations (`{:home home-handler}`), `(def h my-fn)`, and similar
+  // patterns where a fn is passed by value rather than called directly.
+  const inFileDefns = new Set<string>();
+  for (let k = definesBeforePhase1; k < defines.length; k++) {
+    inFileDefns.add(defines[k].name);
+  }
+
+  // Synthetic caller for top-level side-effecting forms. If the file has
+  // no ns declaration, fall back to the file path — it's still a unique
+  // identifier that downstream analyses can treat as "always live".
+  const topLevelCaller = nsName ?? `<toplevel:${filePath}>`;
+
+  // ── Phase 2: walk bodies for call edges ──────────────────────────
   for (let i = 0; i < rootNode.childCount; i++) {
     const child = rootNode.child(i);
     if (child.type !== "list_lit") continue;
 
-    const defn = cljDefnName(child);
-    if (!defn) continue;
+    const head = cljListHead(child);
+    if (!head) {
+      // Non-symbolic head (keyword-first, map-first, etc.) at top level.
+      // Still walk it as file-level init — unusual but possible.
+      cljExtractCalls(child, topLevelCaller, inFileDefns, calls, callSet);
+      continue;
+    }
 
-    // Walk the body looking for call sites (list_lit starting with sym_lit)
-    cljExtractCalls(child, defn.name, calls, callSet);
+    switch (head.name) {
+      case "ns":
+        // Already handled in phase 1.
+        break;
+
+      case "defn":
+      case "defn-":
+      case "deftest": {
+        const name = cljNextSymNameAfter(child, head.symIdx);
+        if (name) cljExtractCalls(child, name, inFileDefns, calls, callSet);
+        break;
+      }
+
+      case "defmulti": {
+        // No body — just the dispatch fn. Walk it so e.g.
+        //   (defmulti route :path)
+        // registers a reference to `:path`-like dispatch fns if they're
+        // named. Attribute to the multi name.
+        const name = cljNextSymNameAfter(child, head.symIdx);
+        if (name) cljExtractCalls(child, name, inFileDefns, calls, callSet);
+        break;
+      }
+
+      case "defmethod": {
+        // (defmethod multi-name dispatch-val [args] body). Attribute calls
+        // in the body to the multi name, so a private helper invoked here
+        // is recorded as "called by" the multi and won't look dead.
+        const multiName = cljNextSymNameAfter(child, head.symIdx);
+        if (multiName) cljExtractCalls(child, multiName, inFileDefns, calls, callSet);
+        break;
+      }
+
+      case "defrecord":
+      case "deftype":
+      case "extend-type":
+      case "extend-protocol": {
+        cljWalkDispatchMethods(child, inFileDefns, calls, callSet);
+        break;
+      }
+
+      default: {
+        // Unrecognized top-level form — walk as file-level init with the
+        // ns name as caller. Catches use-fixtures, (def x (compute)),
+        // (require '[...]), raw println calls, etc.
+        if (!CLJ_RECOGNIZED_TOPLEVEL.has(head.name)) {
+          cljExtractCalls(child, topLevelCaller, inFileDefns, calls, callSet);
+        }
+        break;
+      }
+    }
   }
 }
 
@@ -861,6 +1067,7 @@ const CLJ_SPECIAL_FORMS = new Set([
   // Definition macros
   "defn", "defn-", "defmacro", "defmulti", "defmethod", "defprotocol",
   "defrecord", "deftype", "definterface", "defonce", "defstruct",
+  "extend-type", "extend-protocol", "extend", "reify",
   // Control-flow / binding macros
   "when", "when-not", "when-let", "when-some", "when-first",
   "if-let", "if-some", "if-not",
@@ -876,41 +1083,182 @@ const CLJ_SPECIAL_FORMS = new Set([
   "with-meta", "with-redefs", "with-redefs-fn",
 ]);
 
-/** Recursively extract function calls from a Clojure form */
-function cljExtractCalls(
-  node: any,
+/**
+ * HOFs whose first argument is the function being invoked. For
+ * `(mapv f xs)` / `(filter pred xs)` / `(reduce f init xs)` / etc., only
+ * the first sym_lit arg is a fn reference; subsequent sym_lits are
+ * collections or accumulator values and emitting edges for them just adds
+ * noise. `partial` belongs here too (`(partial f bound-arg)`).
+ */
+const CLJ_HOFS_ARG1 = new Set([
+  "map", "mapv", "mapcat", "pmap", "map-indexed",
+  "filter", "filterv", "remove",
+  "reduce", "reduce-kv", "reductions",
+  "keep", "keep-indexed",
+  "apply", "partial",
+  "every?", "not-every?", "some", "not-any?",
+  "sort-by", "group-by", "partition-by",
+  "take-while", "drop-while", "split-with",
+  "iterate", "repeatedly",
+  "memoize", "fnil",
+  "run!", "trampoline", "complement",
+]);
+
+/**
+ * HOFs where every argument is a function (composed/combined). `(comp f g h)`
+ * and `(juxt f g h)` both invoke every argument. `use-fixtures` belongs
+ * here too — `(use-fixtures :each f1 f2 ...)` registers each fn as a
+ * fixture. The leading `:each`/`:once` keyword is skipped by the
+ * sym_lit-only filter.
+ */
+const CLJ_HOFS_ALL_ARGS = new Set([
+  "comp", "juxt", "use-fixtures",
+]);
+
+/**
+ * Threading-style macros whose non-value arguments can include bare
+ * sym_lit function references. The value is the number of *initial*
+ * forms (after the head) that are the threaded value / binding name and
+ * must be skipped. Subsequent bare sym_lit args are emitted as fn refs.
+ *
+ *   ->, ->>, some->, some->> — `(-> x foo bar)` : skip 1 (the value)
+ *   cond->, cond->>          — `(cond-> x t1 f1 t2 f2)` : skip 1. Tests
+ *                              usually aren't bare syms, forms often are.
+ *   doto                     — `(doto obj m1 m2)` : skip 1 (the object)
+ *   as->                     — `(as-> init $ f1 f2)` : skip 2 (value + binding)
+ */
+const CLJ_THREADING_MACROS = new Map<string, number>([
+  ["->", 1], ["->>", 1], ["some->", 1], ["some->>", 1],
+  ["cond->", 1], ["cond->>", 1], ["doto", 1],
+  ["as->", 2],
+]);
+
+/** Child types we recurse into when hunting for call sites. */
+const CLJ_RECURSE_TYPES = new Set([
+  "list_lit", "vec_lit", "map_lit", "set_lit",
+  // Reader macros that wrap executable forms. Without these, calls inside
+  //   #(foo %)        — anon fn
+  //   #?(:clj (foo))  — reader conditional
+  //   @(promise-fn)   — deref of a call
+  //   #:ns{:k (foo)}  — ns-map with fn values
+  // are invisible to the call-graph extractor.
+  "anon_fn_lit", "read_cond_lit", "splicing_read_cond_lit", "ns_map_lit",
+  "derefing_lit", "syn_quoting_lit", "unquoting_lit",
+  "unquote_splicing_lit", "tagged_or_ctor_lit",
+]);
+
+/**
+ * Process a single list-like form (list_lit or anon_fn_lit) as a call
+ * site: emit its head as a callee, then apply HOF / threading-macro
+ * reference rules to its arguments.
+ */
+function cljProcessCallSite(
+  listLike: any,
   enclosingFn: string,
   calls: CallsFact[],
   callSet: Set<string>,
 ): void {
-  for (let i = 0; i < node.childCount; i++) {
-    const child = node.child(i);
-    if (child.type === "list_lit") {
-      // First sym_lit child is the function being called
-      for (let j = 0; j < child.childCount; j++) {
-        const maybeCall = child.child(j);
-        if (maybeCall.type === "sym_lit") {
-          let callee = cljSymName(maybeCall);
-          if (callee && callee !== enclosingFn) {
-            // Strip namespace qualifier: db/query → query
-            if (callee.includes("/")) {
-              callee = callee.split("/").pop()!;
-            }
-            if (!CLJ_SPECIAL_FORMS.has(callee)) {
-              const key = `${enclosingFn}->${callee}`;
-              if (!callSet.has(key)) {
-                callSet.add(key);
-                calls.push({ caller: enclosingFn, callee });
-              }
-            }
-          }
-          break;
+  const emit = (calleeRaw: string): void => {
+    const callee = calleeRaw.includes("/") ? calleeRaw.split("/").pop()! : calleeRaw;
+    if (!callee || callee === enclosingFn) return;
+    if (CLJ_SPECIAL_FORMS.has(callee)) return;
+    const key = `${enclosingFn}->${callee}`;
+    if (callSet.has(key)) return;
+    callSet.add(key);
+    calls.push({ caller: enclosingFn, callee });
+  };
+
+  const head = cljListHead(listLike);
+  if (!head) return;
+  emit(head.name);
+
+  const normalizedHead = head.name.includes("/")
+    ? head.name.split("/").pop()!
+    : head.name;
+
+  if (CLJ_HOFS_ARG1.has(normalizedHead)) {
+    // Emit only the first form-bearing argument if it's a sym_lit.
+    // Stopping after the first form avoids edges for collection args
+    // like `coll` in `(filter pred coll)`.
+    for (let k = head.symIdx + 1; k < listLike.childCount; k++) {
+      const arg = listLike.child(k);
+      if (!CLJ_FORM_TYPES.has(arg.type)) continue;
+      if (arg.type === "sym_lit") {
+        const argName = cljSymName(arg);
+        if (argName) emit(argName);
+      }
+      break;
+    }
+  } else if (CLJ_HOFS_ALL_ARGS.has(normalizedHead)) {
+    // Every sym_lit argument is a function reference.
+    for (let k = head.symIdx + 1; k < listLike.childCount; k++) {
+      const arg = listLike.child(k);
+      if (arg.type !== "sym_lit") continue;
+      const argName = cljSymName(arg);
+      if (argName) emit(argName);
+    }
+  } else {
+    const skipCount = CLJ_THREADING_MACROS.get(normalizedHead);
+    if (skipCount !== undefined) {
+      // Skip the first `skipCount` forms (value and optionally binding name),
+      // then emit every bare sym_lit arg as a fn reference.
+      let skipped = 0;
+      for (let k = head.symIdx + 1; k < listLike.childCount; k++) {
+        const arg = listLike.child(k);
+        if (!CLJ_FORM_TYPES.has(arg.type)) continue;
+        if (skipped < skipCount) {
+          skipped++;
+          continue;
+        }
+        if (arg.type === "sym_lit") {
+          const argName = cljSymName(arg);
+          if (argName) emit(argName);
         }
       }
     }
-    // Recurse into nested forms (list, vec, map, set)
-    if (child.type === "list_lit" || child.type === "vec_lit" || child.type === "map_lit" || child.type === "set_lit") {
-      cljExtractCalls(child, enclosingFn, calls, callSet);
+  }
+}
+
+/**
+ * Recursively extract function calls from a Clojure form. Treats the
+ * passed node itself as a call site if it's list-like, then recurses
+ * into children — recursion handles every nested list_lit / anon_fn_lit
+ * as its own call site via the same top-of-function check.
+ *
+ * Every sym_lit encountered at any depth is also checked against
+ * `inFileDefns`: if its name matches a definition in the current file,
+ * an edge is emitted. This covers in-file references that aren't at
+ * list-head position — e.g. fns passed to user-defined HOFs, fn values
+ * in map literals, `(def h my-fn)`, and registration-style calls like
+ * `(reg-event-fx :k handler)`.
+ */
+function cljExtractCalls(
+  node: any,
+  enclosingFn: string,
+  inFileDefns: Set<string>,
+  calls: CallsFact[],
+  callSet: Set<string>,
+): void {
+  if (node.type === "list_lit" || node.type === "anon_fn_lit") {
+    cljProcessCallSite(node, enclosingFn, calls, callSet);
+  }
+  for (let i = 0; i < node.childCount; i++) {
+    const child = node.child(i);
+    if (child.type === "sym_lit") {
+      const name = cljSymName(child);
+      if (name) {
+        const bare = name.includes("/") ? name.split("/").pop()! : name;
+        if (bare && bare !== enclosingFn && inFileDefns.has(bare)) {
+          const key = `${enclosingFn}->${bare}`;
+          if (!callSet.has(key)) {
+            callSet.add(key);
+            calls.push({ caller: enclosingFn, callee: bare });
+          }
+        }
+      }
+    }
+    if (CLJ_RECURSE_TYPES.has(child.type)) {
+      cljExtractCalls(child, enclosingFn, inFileDefns, calls, callSet);
     }
   }
 }
