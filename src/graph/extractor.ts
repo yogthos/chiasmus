@@ -80,7 +80,45 @@ function extractFromTree(
     walkGo(tree.rootNode, filePath, defines, calls, imports, exports, contains, callSet);
   } else {
     const scopeStack: string[] = [];
-    walkNode(tree.rootNode, filePath, lang, scopeStack, defines, calls, imports, exports, contains, callSet);
+    // Per-file alias map: local name → imported name. Populated as
+    // `import_statement` nodes are encountered during the walk, read by
+    // `resolveCallee` so a call to `bar()` from `import { foo as bar }`
+    // records an edge to `foo`, matching the exported name on the other
+    // side of the module boundary. ES imports are syntactically required
+    // to appear before any executable code, so building the map lazily
+    // during the walk is safe.
+    const aliasMap = new Map<string, string>();
+    // Function-reference queue: every `foo` identifier passed as a direct
+    // call argument is recorded here during the walk, then resolved after
+    // the walk against the file's final defines + imports. Deferred
+    // resolution is necessary because the reference can appear *before*
+    // the callee is defined in source order (e.g. `names.map(quoteIfNeeded)`
+    // above a `function quoteIfNeeded(...)` declaration).
+    const pendingRefs: Array<{ caller: string; callee: string }> = [];
+    walkNode(tree.rootNode, filePath, lang, scopeStack, aliasMap, pendingRefs, defines, calls, imports, exports, contains, callSet);
+
+    // Resolve pending references. A ref becomes a real edge iff the target
+    // name is a function/method defined in this file or an import binding
+    // this file owns. Non-matching names are dropped so local variable
+    // identifiers (req, opts, config, etc.) don't pollute the graph.
+    const knownNames = new Set<string>();
+    for (const d of defines) {
+      if (d.file !== filePath) continue;
+      if (d.kind === "function" || d.kind === "method" || d.kind === "class") {
+        knownNames.add(d.name);
+      }
+    }
+    for (const imp of imports) {
+      if (imp.file === filePath) knownNames.add(imp.name);
+    }
+    for (const ref of pendingRefs) {
+      if (!knownNames.has(ref.callee)) continue;
+      if (ref.caller === ref.callee) continue;
+      const key = `${ref.caller}->${ref.callee}`;
+      if (callSet.has(key)) continue;
+      callSet.add(key);
+      calls.push({ caller: ref.caller, callee: ref.callee });
+    }
   }
 }
 
@@ -89,6 +127,8 @@ function walkNode(
   filePath: string,
   language: string,
   scopeStack: string[],
+  aliasMap: Map<string, string>,
+  pendingRefs: Array<{ caller: string; callee: string }>,
   defines: DefinesFact[],
   calls: CallsFact[],
   imports: ImportsFact[],
@@ -104,7 +144,7 @@ function walkNode(
       if (name) {
         defines.push({ file: filePath, name, kind: "function", line: node.startPosition.row + 1 });
         scopeStack.push(name);
-        walkChildren(node, filePath, language, scopeStack, defines, calls, imports, exports, contains, callSet);
+        walkChildren(node, filePath, language, scopeStack, aliasMap, pendingRefs, defines, calls, imports, exports, contains, callSet);
         scopeStack.pop();
         return; // already walked children
       }
@@ -121,7 +161,7 @@ function walkNode(
           contains.push({ parent: className, child: name });
         }
         scopeStack.push(name);
-        walkChildren(node, filePath, language, scopeStack, defines, calls, imports, exports, contains, callSet);
+        walkChildren(node, filePath, language, scopeStack, aliasMap, pendingRefs, defines, calls, imports, exports, contains, callSet);
         scopeStack.pop();
         return;
       }
@@ -133,7 +173,7 @@ function walkNode(
       if (name) {
         defines.push({ file: filePath, name, kind: "class", line: node.startPosition.row + 1 });
         scopeStack.push(name);
-        walkChildren(node, filePath, language, scopeStack, defines, calls, imports, exports, contains, callSet);
+        walkChildren(node, filePath, language, scopeStack, aliasMap, pendingRefs, defines, calls, imports, exports, contains, callSet);
         scopeStack.pop();
         return;
       }
@@ -152,11 +192,11 @@ function walkNode(
             const name = nameNode.text;
             defines.push({ file: filePath, name, kind: "function", line: node.startPosition.row + 1 });
             scopeStack.push(name);
-            walkChildren(valueNode, filePath, language, scopeStack, defines, calls, imports, exports, contains, callSet);
+            walkChildren(valueNode, filePath, language, scopeStack, aliasMap, pendingRefs, defines, calls, imports, exports, contains, callSet);
             scopeStack.pop();
             foundArrow = true;
           } else if (valueNode) {
-            walkChildren(child, filePath, language, scopeStack, defines, calls, imports, exports, contains, callSet);
+            walkChildren(child, filePath, language, scopeStack, aliasMap, pendingRefs, defines, calls, imports, exports, contains, callSet);
           }
         }
       }
@@ -165,13 +205,35 @@ function walkNode(
     }
 
     case "call_expression": {
-      const callee = resolveCallee(node);
+      const callee = resolveCallee(node, aliasMap);
       const caller = scopeStack.length > 0 ? scopeStack[scopeStack.length - 1] : null;
       if (callee && caller) {
         const key = `${caller}->${callee}`;
         if (!callSet.has(key)) {
           callSet.add(key);
           calls.push({ caller, callee });
+        }
+      }
+      // Record identifier arguments as potential function references.
+      // Passing a fn by reference (arr.map(fn), emitter.on("sig", fn))
+      // doesn't generate a call_expression for `fn` itself, so without
+      // this pass the target looks unused and dead-code analysis flags
+      // it as dead. We collect the (caller, argIdentifier) pairs here
+      // and resolve them against the file's known function names after
+      // the walk finishes.
+      if (caller) {
+        const argsNode = node.childForFieldName("arguments");
+        if (argsNode) {
+          for (let i = 0; i < argsNode.childCount; i++) {
+            const arg = argsNode.child(i);
+            if (arg.type !== "identifier") continue;
+            const argName = arg.text;
+            // Rewrite through aliasMap so a reference to an aliased
+            // import resolves to the canonical exported name, matching
+            // what resolveCallee does for direct calls.
+            const canonical = aliasMap.get(argName) ?? argName;
+            pendingRefs.push({ caller, callee: canonical });
+          }
         }
       }
       break; // fall through to walk children (nested calls)
@@ -183,7 +245,7 @@ function walkNode(
       if (source) {
         const importClause = node.children.find((c: any) => c.type === "import_clause");
         if (importClause) {
-          extractImportNames(importClause, filePath, source, imports);
+          extractImportNames(importClause, filePath, source, imports, aliasMap);
         }
       }
       return; // no need to walk deeper
@@ -246,7 +308,7 @@ function walkNode(
     }
   }
 
-  walkChildren(node, filePath, language, scopeStack, defines, calls, imports, exports, contains, callSet);
+  walkChildren(node, filePath, language, scopeStack, aliasMap, pendingRefs, defines, calls, imports, exports, contains, callSet);
 }
 
 function walkChildren(
@@ -254,6 +316,8 @@ function walkChildren(
   filePath: string,
   language: string,
   scopeStack: string[],
+  aliasMap: Map<string, string>,
+  pendingRefs: Array<{ caller: string; callee: string }>,
   defines: DefinesFact[],
   calls: CallsFact[],
   imports: ImportsFact[],
@@ -262,18 +326,26 @@ function walkChildren(
   callSet: Set<string>,
 ): void {
   for (let i = 0; i < node.childCount; i++) {
-    walkNode(node.child(i), filePath, language, scopeStack, defines, calls, imports, exports, contains, callSet);
+    walkNode(node.child(i), filePath, language, scopeStack, aliasMap, pendingRefs, defines, calls, imports, exports, contains, callSet);
   }
 }
 
-/** Resolve the callee name from a call_expression node */
-function resolveCallee(callNode: any): string | null {
+/**
+ * Resolve the callee name from a call_expression node. If the identifier
+ * matches a local alias from `import { foo as bar }`, the call is
+ * rewritten to the original export name (`foo`) so cross-file analyses
+ * see the link. Member-expression callees aren't rewritten — they reach
+ * into an object, not a top-level binding.
+ */
+function resolveCallee(callNode: any, aliasMap: Map<string, string>): string | null {
   const fnNode = callNode.childForFieldName("function");
   if (!fnNode) return null;
 
   switch (fnNode.type) {
-    case "identifier":
-      return fnNode.text;
+    case "identifier": {
+      const name = fnNode.text;
+      return aliasMap.get(name) ?? name;
+    }
 
     case "member_expression": {
       // obj.method() → method, this.method() → method
@@ -306,12 +378,21 @@ function findEnclosingClassName(node: any): string | null {
   return null;
 }
 
-/** Extract import names from an import_clause */
+/**
+ * Extract import names from an import_clause. For each named specifier
+ * we push an ImportsFact keyed by the *imported* name (so the imports
+ * list reflects the exported identifier as seen by the module being
+ * imported), and — when the local binding differs (an `as` alias) —
+ * register a `local → imported` entry in `aliasMap` so call-site
+ * resolution can rewrite calls through the alias back to the canonical
+ * name used by the call graph.
+ */
 function extractImportNames(
   clause: any,
   filePath: string,
   source: string,
   imports: ImportsFact[],
+  aliasMap: Map<string, string>,
 ): void {
   for (let i = 0; i < clause.childCount; i++) {
     const child = clause.child(i);
@@ -321,15 +402,18 @@ function extractImportNames(
       imports.push({ file: filePath, name: child.text, source });
     }
 
-    // Named imports: import { foo, bar } from './baz'
+    // Named imports: import { foo, bar, baz as qux } from './mod'
     if (child.type === "named_imports") {
       for (let j = 0; j < child.childCount; j++) {
         const spec = child.child(j);
-        if (spec.type === "import_specifier") {
-          const name = spec.childForFieldName("name")?.text;
-          if (name) {
-            imports.push({ file: filePath, name, source });
-          }
+        if (spec.type !== "import_specifier") continue;
+        const name = spec.childForFieldName("name")?.text;
+        if (!name) continue;
+        imports.push({ file: filePath, name, source });
+        // `alias` field only exists when the specifier has an `as` clause.
+        const alias = spec.childForFieldName("alias")?.text;
+        if (alias && alias !== name) {
+          aliasMap.set(alias, name);
         }
       }
     }
@@ -699,22 +783,83 @@ function extractGoReceiverType(receiver: any): string | null {
 
 // ── Clojure extraction ──────────────────────────────────────────────
 
-/** Get the text of the first sym_name child (direct or nested in sym_lit) */
+/**
+ * Get the textual name of a Clojure symbol, preserving any namespace
+ * prefix. tree-sitter-clojure parses a qualified symbol like `db/query`
+ * into a sym_lit containing a `sym_ns` child ("db") and a `sym_name`
+ * child ("query"); returning just the `sym_name` loses the ns info and
+ * conflates cross-namespace calls. Reconstruct `ns/name` when both are
+ * present, otherwise fall back to the bare `sym_name`.
+ */
 function cljSymName(node: any): string | null {
   if (node.type === "sym_name") return node.text;
   if (node.type === "sym_lit") {
+    let ns: string | null = null;
+    let name: string | null = null;
     for (let i = 0; i < node.childCount; i++) {
-      if (node.child(i).type === "sym_name") return node.child(i).text;
+      const c = node.child(i);
+      if (c.type === "sym_ns") ns = c.text;
+      else if (c.type === "sym_name" && name === null) name = c.text;
     }
+    if (name === null) return null;
+    return ns ? `${ns}/${name}` : name;
   }
   return null;
 }
 
-/** Extract ns form: (ns foo.bar (:require [baz.qux :as q] [x.y :refer [z]])) */
+/**
+ * Per-file Clojure context: current namespace + :as alias resolution map +
+ * qualified in-file define set. Shared by every extraction helper so they
+ * can emit namespace-qualified names instead of bare ones.
+ */
+interface CljCtx {
+  /** Value of the (ns ...) form, or null if the file has no ns declaration. */
+  currentNs: string | null;
+  /** alias → full namespace, built from (:require [foo.bar :as x]). */
+  aliasMap: Map<string, string>;
+  /** Qualified names (`ns/name`) of defines in this file. Populated in phase 1. */
+  inFileDefns: Set<string>;
+}
+
+/**
+ * Resolve a Clojure call target to its canonical form. Rules:
+ *   - `alias/name` where alias is in aliasMap → `<full-ns>/name`
+ *   - `prefix/name` where prefix is unknown → returned as-is (already fully
+ *     qualified, or an alias we couldn't resolve — either way, leave it)
+ *   - bare `name` where `<currentNs>/name` is defined in this file → qualify
+ *     to the current ns (same-file reference)
+ *   - bare `name` otherwise → returned as-is (external, clojure.core, etc.)
+ *
+ * When `currentNs` is null (file has no ns form) the bare path just returns
+ * the input, preserving the legacy "bare names everywhere" behavior for
+ * script-style files.
+ */
+function qualifyCljName(name: string, ctx: CljCtx): string {
+  const slashIdx = name.indexOf("/");
+  if (slashIdx >= 0) {
+    const prefix = name.slice(0, slashIdx);
+    const local = name.slice(slashIdx + 1);
+    const fullNs = ctx.aliasMap.get(prefix);
+    if (fullNs) return `${fullNs}/${local}`;
+    return name;
+  }
+  if (ctx.currentNs === null) return name;
+  const candidate = `${ctx.currentNs}/${name}`;
+  if (ctx.inFileDefns.has(candidate)) return candidate;
+  return name;
+}
+
+/**
+ * Extract ns form: (ns foo.bar (:require [baz.qux :as q] [x.y :refer [z]])).
+ * Populates `imports` with the required namespaces and `aliasMap` with any
+ * `:as` bindings so the call extractor can resolve `q/some-fn` to
+ * `baz.qux/some-fn`.
+ */
 function cljExtractNs(
   listNode: any,
   filePath: string,
   imports: ImportsFact[],
+  aliasMap: Map<string, string>,
 ): string | null {
   let symIdx = -1;
   for (let i = 0; i < listNode.childCount; i++) {
@@ -750,15 +895,34 @@ function cljExtractNs(
           for (let k = j + 1; k < child.childCount; k++) {
             const vec = child.child(k);
             if (vec.type === "vec_lit") {
-              // First sym_lit in vector is the required namespace
+              // First sym_lit in vector is the required namespace; scan for
+              // a trailing `:as alias` pair so alias → full-ns can be
+              // resolved at call sites.
+              let reqNs: string | null = null;
               for (let l = 0; l < vec.childCount; l++) {
-                if (vec.child(l).type === "sym_lit") {
-                  const reqNs = cljSymName(vec.child(l));
-                  if (reqNs) {
-                    imports.push({ file: filePath, name: reqNs, source: reqNs });
-                  }
+                const vc = vec.child(l);
+                if (vc.type === "sym_lit") {
+                  reqNs = cljSymName(vc);
                   break;
                 }
+              }
+              if (!reqNs) continue;
+              imports.push({ file: filePath, name: reqNs, source: reqNs });
+
+              for (let l = 0; l < vec.childCount; l++) {
+                const vc = vec.child(l);
+                if (vc.type !== "kwd_lit") continue;
+                const kname = vc.children?.find((c: any) => c.type === "kwd_name")?.text;
+                if (kname !== "as") continue;
+                for (let m = l + 1; m < vec.childCount; m++) {
+                  const asSym = vec.child(m);
+                  if (asSym.type === "sym_lit") {
+                    const alias = cljSymName(asSym);
+                    if (alias) aliasMap.set(alias, reqNs);
+                    break;
+                  }
+                }
+                break;
               }
             }
           }
@@ -847,7 +1011,7 @@ function cljMethodImplName(listNode: any): string | null {
  */
 function cljWalkDispatchMethods(
   parentList: any,
-  inFileDefns: Set<string>,
+  ctx: CljCtx,
   calls: CallsFact[],
   callSet: Set<string>,
 ): void {
@@ -856,7 +1020,10 @@ function cljWalkDispatchMethods(
     if (child.type !== "list_lit") continue;
     const methodName = cljMethodImplName(child);
     if (methodName) {
-      cljExtractCalls(child, methodName, inFileDefns, calls, callSet);
+      // Method implementations are attributed to the bare method name
+      // (not qualified): dispatch method names are looked up by unqualified
+      // identifier and usually match a defprotocol entry elsewhere.
+      cljExtractCalls(child, methodName, ctx, calls, callSet);
     }
   }
 }
@@ -886,7 +1053,13 @@ function walkClojure(
   callSet: Set<string>,
 ): void {
   let nsName: string | null = null;
+  const aliasMap = new Map<string, string>();
   const definesBeforePhase1 = defines.length;
+
+  // Phase 1 pushes bare names and records the boundaries; after phase 1
+  // finishes we'll rewrite them in-place to qualified form once we know the
+  // final ns. Deferring the rewrite avoids having to know the ns before
+  // seeing the (ns ...) form, which can appear anywhere in the file.
 
   // ── Phase 1: collect top-level definitions ────────────────────────
   // In addition to defn/defn-, we also register defmulti, defprotocol
@@ -897,9 +1070,9 @@ function walkClojure(
     const child = rootNode.child(i);
     if (child.type !== "list_lit") continue;
 
-    // ns form — harvest requires and capture the namespace name for use
-    // as the top-level caller in phase 2.
-    const ns = cljExtractNs(child, filePath, imports);
+    // ns form — harvest requires, :as aliases, and the namespace name for
+    // use as the top-level caller in phase 2.
+    const ns = cljExtractNs(child, filePath, imports, aliasMap);
     if (ns) {
       nsName = ns;
       continue;
@@ -972,16 +1145,44 @@ function walkClojure(
     }
   }
 
+  // Post-phase-1 qualification: now that the (ns ...) form has been seen
+  // (or confirmed absent), rewrite each define pushed during phase 1 to
+  // its namespace-qualified form. `defprotocol`/`definterface` method rows
+  // (kind === "function" nested inside a class define) are qualified too —
+  // they look identical to defn from the graph's perspective. Classes
+  // (defrecord/deftype/definterface) are also qualified.
+  //
+  // If nsName is null the file is in legacy "bare" mode and names stay as
+  // they were pushed — this keeps script-style .clj fixtures working.
+  if (nsName !== null) {
+    for (let k = definesBeforePhase1; k < defines.length; k++) {
+      defines[k].name = `${nsName}/${defines[k].name}`;
+    }
+    // Exports were pushed alongside defines in phase 1. They were appended
+    // after definesBeforePhase1 as we went, but exports and defines are
+    // separate arrays — rewrite exports for this file by walking from the
+    // pre-phase-1 length of the exports array.
+    // We don't have a snapshot of the export length, so scan the tail for
+    // entries belonging to this file and qualify those whose name still
+    // looks bare.
+    for (let k = exports.length - 1; k >= 0 && exports[k].file === filePath; k--) {
+      if (!exports[k].name.includes("/")) {
+        exports[k].name = `${nsName}/${exports[k].name}`;
+      }
+    }
+  }
+
   // Snapshot the set of names defined in *this file* during phase 1.
   // Phase 2's cljExtractCalls uses this to recognize in-file references:
   // whenever it encounters a sym_lit whose name matches one of these,
-  // it emits a reference edge. This covers user-defined HOFs, map-value
-  // registrations (`{:home home-handler}`), `(def h my-fn)`, and similar
-  // patterns where a fn is passed by value rather than called directly.
+  // it emits a reference edge. Names here are already qualified if the
+  // file had an ns form.
   const inFileDefns = new Set<string>();
   for (let k = definesBeforePhase1; k < defines.length; k++) {
     inFileDefns.add(defines[k].name);
   }
+
+  const ctx: CljCtx = { currentNs: nsName, aliasMap, inFileDefns };
 
   // Synthetic caller for top-level side-effecting forms. If the file has
   // no ns declaration, fall back to the file path — it's still a unique
@@ -989,6 +1190,14 @@ function walkClojure(
   const topLevelCaller = nsName ?? `<toplevel:${filePath}>`;
 
   // ── Phase 2: walk bodies for call edges ──────────────────────────
+  //
+  // Phase-2 callers are qualified whenever the file has an ns form: `defn
+  // foo` in `ns myapp.core` becomes the caller `myapp.core/foo`. This
+  // matches the (already rewritten) entries in `defines` so cross-file
+  // analyses see a consistent graph.
+  const qualifyCaller = (bare: string): string =>
+    nsName !== null ? `${nsName}/${bare}` : bare;
+
   for (let i = 0; i < rootNode.childCount; i++) {
     const child = rootNode.child(i);
     if (child.type !== "list_lit") continue;
@@ -997,7 +1206,7 @@ function walkClojure(
     if (!head) {
       // Non-symbolic head (keyword-first, map-first, etc.) at top level.
       // Still walk it as file-level init — unusual but possible.
-      cljExtractCalls(child, topLevelCaller, inFileDefns, calls, callSet);
+      cljExtractCalls(child, topLevelCaller, ctx, calls, callSet);
       continue;
     }
 
@@ -1010,7 +1219,7 @@ function walkClojure(
       case "defn-":
       case "deftest": {
         const name = cljNextSymNameAfter(child, head.symIdx);
-        if (name) cljExtractCalls(child, name, inFileDefns, calls, callSet);
+        if (name) cljExtractCalls(child, qualifyCaller(name), ctx, calls, callSet);
         break;
       }
 
@@ -1020,7 +1229,7 @@ function walkClojure(
         // registers a reference to `:path`-like dispatch fns if they're
         // named. Attribute to the multi name.
         const name = cljNextSymNameAfter(child, head.symIdx);
-        if (name) cljExtractCalls(child, name, inFileDefns, calls, callSet);
+        if (name) cljExtractCalls(child, qualifyCaller(name), ctx, calls, callSet);
         break;
       }
 
@@ -1029,7 +1238,7 @@ function walkClojure(
         // in the body to the multi name, so a private helper invoked here
         // is recorded as "called by" the multi and won't look dead.
         const multiName = cljNextSymNameAfter(child, head.symIdx);
-        if (multiName) cljExtractCalls(child, multiName, inFileDefns, calls, callSet);
+        if (multiName) cljExtractCalls(child, qualifyCaller(multiName), ctx, calls, callSet);
         break;
       }
 
@@ -1037,7 +1246,7 @@ function walkClojure(
       case "deftype":
       case "extend-type":
       case "extend-protocol": {
-        cljWalkDispatchMethods(child, inFileDefns, calls, callSet);
+        cljWalkDispatchMethods(child, ctx, calls, callSet);
         break;
       }
 
@@ -1046,7 +1255,7 @@ function walkClojure(
         // ns name as caller. Catches use-fixtures, (def x (compute)),
         // (require '[...]), raw println calls, etc.
         if (!CLJ_RECOGNIZED_TOPLEVEL.has(head.name)) {
-          cljExtractCalls(child, topLevelCaller, inFileDefns, calls, callSet);
+          cljExtractCalls(child, topLevelCaller, ctx, calls, callSet);
         }
         break;
       }
@@ -1155,13 +1364,22 @@ const CLJ_RECURSE_TYPES = new Set([
 function cljProcessCallSite(
   listLike: any,
   enclosingFn: string,
+  ctx: CljCtx,
   calls: CallsFact[],
   callSet: Set<string>,
 ): void {
   const emit = (calleeRaw: string): void => {
-    const callee = calleeRaw.includes("/") ? calleeRaw.split("/").pop()! : calleeRaw;
+    if (!calleeRaw) return;
+    // Special-form filtering happens on the bare tail: `let` is a special
+    // form whether written as `let` or `some.ns/let` (the latter is
+    // degenerate but the filter shouldn't care). The aliased test lets
+    // us shed def/let/if/etc. before paying for resolution.
+    const slashIdx = calleeRaw.indexOf("/");
+    const bareTail = slashIdx >= 0 ? calleeRaw.slice(slashIdx + 1) : calleeRaw;
+    if (slashIdx < 0 && CLJ_SPECIAL_FORMS.has(bareTail)) return;
+
+    const callee = qualifyCljName(calleeRaw, ctx);
     if (!callee || callee === enclosingFn) return;
-    if (CLJ_SPECIAL_FORMS.has(callee)) return;
     const key = `${enclosingFn}->${callee}`;
     if (callSet.has(key)) return;
     callSet.add(key);
@@ -1226,39 +1444,39 @@ function cljProcessCallSite(
  * as its own call site via the same top-of-function check.
  *
  * Every sym_lit encountered at any depth is also checked against
- * `inFileDefns`: if its name matches a definition in the current file,
- * an edge is emitted. This covers in-file references that aren't at
- * list-head position — e.g. fns passed to user-defined HOFs, fn values
- * in map literals, `(def h my-fn)`, and registration-style calls like
- * `(reg-event-fx :k handler)`.
+ * `ctx.inFileDefns`: if its qualified form matches a definition in the
+ * current file, an edge is emitted. This covers in-file references that
+ * aren't at list-head position — e.g. fns passed to user-defined HOFs,
+ * fn values in map literals, `(def h my-fn)`, and registration-style
+ * calls like `(reg-event-fx :k handler)`.
  */
 function cljExtractCalls(
   node: any,
   enclosingFn: string,
-  inFileDefns: Set<string>,
+  ctx: CljCtx,
   calls: CallsFact[],
   callSet: Set<string>,
 ): void {
   if (node.type === "list_lit" || node.type === "anon_fn_lit") {
-    cljProcessCallSite(node, enclosingFn, calls, callSet);
+    cljProcessCallSite(node, enclosingFn, ctx, calls, callSet);
   }
   for (let i = 0; i < node.childCount; i++) {
     const child = node.child(i);
     if (child.type === "sym_lit") {
       const name = cljSymName(child);
       if (name) {
-        const bare = name.includes("/") ? name.split("/").pop()! : name;
-        if (bare && bare !== enclosingFn && inFileDefns.has(bare)) {
-          const key = `${enclosingFn}->${bare}`;
+        const qualified = qualifyCljName(name, ctx);
+        if (qualified && qualified !== enclosingFn && ctx.inFileDefns.has(qualified)) {
+          const key = `${enclosingFn}->${qualified}`;
           if (!callSet.has(key)) {
             callSet.add(key);
-            calls.push({ caller: enclosingFn, callee: bare });
+            calls.push({ caller: enclosingFn, callee: qualified });
           }
         }
       }
     }
     if (CLJ_RECURSE_TYPES.has(child.type)) {
-      cljExtractCalls(child, enclosingFn, inFileDefns, calls, callSet);
+      cljExtractCalls(child, enclosingFn, ctx, calls, callSet);
     }
   }
 }

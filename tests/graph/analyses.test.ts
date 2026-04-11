@@ -212,6 +212,71 @@ describe("runAnalysisFromGraph", () => {
     expect(affected).toContain("main");
   });
 
+  it("impact preserves target when a self-loop exists (matches reaches/2 semantics)", async () => {
+    const graph = makeGraph({
+      calls: [
+        { caller: "outer", callee: "rec" },
+        { caller: "rec", callee: "rec" }, // self-loop
+      ],
+    });
+
+    const r = await runAnalysisFromGraph(graph, { analysis: "impact", target: "rec" });
+    const affected = r.result as string[];
+    expect(affected).toContain("outer");
+    expect(affected).toContain("rec");
+  });
+
+  it("impact strips target when there is no self-loop", async () => {
+    const graph = makeGraph({
+      calls: [{ caller: "outer", callee: "leaf" }],
+    });
+
+    const r = await runAnalysisFromGraph(graph, { analysis: "impact", target: "leaf" });
+    const affected = r.result as string[];
+    expect(affected).toContain("outer");
+    expect(affected).not.toContain("leaf");
+  });
+
+  it("path returns [f, f] for a self-loop (not empty)", async () => {
+    const graph = makeGraph({
+      calls: [{ caller: "rec", callee: "rec" }],
+    });
+
+    const r = await runAnalysisFromGraph(graph, { analysis: "path", from: "rec", to: "rec" });
+    const paths = (r.result as any).paths as string[];
+    expect(paths.length).toBeGreaterThan(0);
+    expect(paths[0]).toBe("[rec,rec]");
+  });
+
+  it("path returns empty when from === to and there is no self-loop", async () => {
+    const graph = makeGraph({
+      calls: [{ caller: "a", callee: "b" }],
+    });
+
+    const r = await runAnalysisFromGraph(graph, { analysis: "path", from: "a", to: "a" });
+    const paths = (r.result as any).paths as string[];
+    expect(paths).toEqual([]);
+  });
+
+  it("unqualified target resolves to namespace-qualified node (Clojure compat)", async () => {
+    const graph = makeGraph({
+      defines: [
+        { file: "hash.clj", name: "toda.hash/from-input-stream", kind: "function", line: 1 },
+      ],
+      calls: [
+        { caller: "toda.packet/load", callee: "toda.hash/from-input-stream" },
+      ],
+    });
+
+    // User passes the bare name `from-input-stream` — must find the qualified match.
+    const r = await runAnalysisFromGraph(graph, {
+      analysis: "callers",
+      target: "from-input-stream",
+    });
+    const callers = r.result as string[];
+    expect(callers).toContain("toda.packet/load");
+  });
+
   it("facts returns valid Prolog string", async () => {
     const graph = makeGraph({
       defines: [{ file: "t.ts", name: "a", kind: "function", line: 1 }],

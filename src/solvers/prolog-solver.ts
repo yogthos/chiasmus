@@ -99,6 +99,16 @@ function instrumentForTracing(program: string): string {
       if (ch === ")") { depth--; pos++; continue; }
 
       if (ch === "." && depth === 0) {
+        // A `.` flanked by digits is a decimal literal (e.g. `3.14`), not
+        // a clause terminator. In Prolog only whitespace, EOF, or `%`
+        // comment legitimately follow a clause-ending period, so the
+        // digit-flanked case is unambiguous.
+        const prevCh = pos > 0 ? program[pos - 1] : "";
+        const nextCh = pos + 1 < len ? program[pos + 1] : "";
+        if (prevCh >= "0" && prevCh <= "9" && nextCh >= "0" && nextCh <= "9") {
+          pos++;
+          continue;
+        }
         pos++;
         const clause = program.slice(clauseStart, pos).trim();
 

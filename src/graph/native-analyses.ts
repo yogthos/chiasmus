@@ -180,63 +180,94 @@ function bfsForward(adj: Map<string, string[]>, source: string): Set<string> {
   return seen;
 }
 
-/** Is `to` reachable from `from` through any call chain? */
+/**
+ * Is `to` reachable from `from` through any call chain?
+ * Unqualified names match any namespace-qualified node; if either end has
+ * multiple matches we return true whenever ANY resolved pair is reachable.
+ */
 export function reachability(graph: CodeGraph, from: string, to: string): boolean {
-  if (from === to) {
-    // Prolog rule: reaches(A,B) holds only via at least one calls step.
-    // So a → a is true only if there's a self-loop.
-    const idx = buildIndex(graph);
-    const outs = idx.adj.get(from);
-    return !!outs && outs.includes(to);
-  }
   const idx = buildIndex(graph);
-  if (!idx.nodes.has(from)) return false;
-  const reached = bfsForward(idx.adj, from);
-  return reached.has(to);
+  const fromTargets = resolveTargets(graph, from);
+  const toTargets = new Set(resolveTargets(graph, to));
+  if (fromTargets.length === 0 || toTargets.size === 0) return false;
+
+  for (const f of fromTargets) {
+    if (!idx.nodes.has(f)) continue;
+    // Self-loop: Prolog reaches(A,B) holds only via at least one call step,
+    // so f → f is true iff f has a self-edge.
+    if (toTargets.has(f)) {
+      const outs = idx.adj.get(f);
+      if (outs && outs.includes(f)) return true;
+    }
+    const reached = bfsForward(idx.adj, f);
+    for (const t of toTargets) {
+      if (t === f) continue; // handled above
+      if (reached.has(t)) return true;
+    }
+  }
+  return false;
 }
 
 /**
  * Shortest call chain from `from` to `to`. Returned as a Prolog-style list
  * string `[a,b,c]` so the result shape matches the old formatter (which
  * forwarded the Path binding as a string).
+ *
+ * Unqualified names match any namespace-qualified node; we try each
+ * (from-match, to-match) pair and return the first non-empty chain.
  */
 export function path(graph: CodeGraph, from: string, to: string): string[] {
   const idx = buildIndex(graph);
-  if (!idx.nodes.has(from)) return [];
+  const fromTargets = resolveTargets(graph, from);
+  const toTargets = new Set(resolveTargets(graph, to));
+  if (fromTargets.length === 0 || toTargets.size === 0) return [];
 
-  const parent = new Map<string, string>();
-  const seen = new Set<string>([from]);
-  const queue: string[] = [from];
-  let head = 0;
-  let found = false;
-  while (head < queue.length) {
-    const u = queue[head++];
-    const outs = idx.adj.get(u);
-    if (!outs) continue;
-    for (const v of outs) {
-      if (seen.has(v)) continue;
-      seen.add(v);
-      parent.set(v, u);
-      if (v === to) {
-        found = true;
-        head = queue.length; // break outer
-        break;
-      }
-      queue.push(v);
+  for (const f of fromTargets) {
+    if (!idx.nodes.has(f)) continue;
+
+    // Self-loop handled as a special case: the BFS below seeds `seen` with
+    // the start node and skips neighbors already in `seen`, so it can
+    // never surface an f → f chain even when a genuine self-edge exists.
+    if (toTargets.has(f)) {
+      const outs = idx.adj.get(f);
+      if (outs && outs.includes(f)) return [formatPrologList([f, f])];
     }
-  }
-  if (!found) return [];
 
-  const chain: string[] = [];
-  let cur: string | undefined = to;
-  while (cur !== undefined) {
-    chain.push(cur);
-    cur = parent.get(cur);
+    const parent = new Map<string, string>();
+    const seen = new Set<string>([f]);
+    const queue: string[] = [f];
+    let head = 0;
+    let target: string | null = null;
+    while (head < queue.length) {
+      const u = queue[head++];
+      const outs = idx.adj.get(u);
+      if (!outs) continue;
+      let hit = false;
+      for (const v of outs) {
+        if (seen.has(v)) continue;
+        seen.add(v);
+        parent.set(v, u);
+        if (toTargets.has(v)) {
+          target = v;
+          hit = true;
+          break;
+        }
+        queue.push(v);
+      }
+      if (hit) break;
+    }
+    if (target === null) continue;
+
+    const chain: string[] = [];
+    let cur: string | undefined = target;
+    while (cur !== undefined) {
+      chain.push(cur);
+      cur = parent.get(cur);
+    }
+    chain.reverse();
+    return [formatPrologList(chain)];
   }
-  chain.reverse();
-  // Format as Prolog list literal to match the shape emitted by the old
-  // string-based path binding.
-  return [formatPrologList(chain)];
+  return [];
 }
 
 function formatPrologList(names: string[]): string {
@@ -256,17 +287,73 @@ function quoteIfNeeded(s: string): string {
   return `'${escaped}'`;
 }
 
+//
+// Resolve a user-supplied target name to every matching node in the graph.
+//
+// Clojure (and any other language that emits namespace-qualified names)
+// stores defines as `my.ns/fn`. A user running
+//   chiasmus_graph analysis=callers target=fn
+// expects to find callers of `fn` regardless of namespace. We match:
+//   1. exact name — fast path for languages that use bare names
+//   2. any `<ns>/target` suffix — a user typing `from-input-stream` gets
+//      every `toda.hash/from-input-stream`, `toda.packet/from-input-stream`,
+//      etc.
+//
+// If the input already contains a `/` it's treated as fully qualified and
+// we only check exact match. Returns an empty array when nothing matches,
+// so downstream analyses can short-circuit.
+//
+function resolveTargets(graph: CodeGraph, target: string): string[] {
+  const allNames = new Set<string>();
+  for (const d of graph.defines) allNames.add(d.name);
+  for (const c of graph.calls) {
+    allNames.add(c.caller);
+    allNames.add(c.callee);
+  }
+
+  if (allNames.has(target)) return [target];
+  if (target.includes("/")) return [];
+
+  const suffix = `/${target}`;
+  const matches: string[] = [];
+  for (const n of allNames) {
+    if (n.endsWith(suffix)) matches.push(n);
+  }
+  return matches;
+}
+
 /**
  * Transitive callers of `target` — every node that can reach `target`
  * through any chain of calls. This is the impact analysis: what breaks if
- * `target` changes.
+ * `target` changes. If `target` is unqualified and multiple namespace-
+ * qualified matches exist, union their impact sets.
  */
 export function impact(graph: CodeGraph, target: string): string[] {
   const idx = buildIndex(graph);
-  if (!idx.nodes.has(target)) return [];
-  const reached = bfsForward(idx.rev, target);
-  reached.delete(target); // Prolog reaches(X, target) excludes the target itself.
-  return Array.from(reached);
+  const targets = resolveTargets(graph, target);
+  if (targets.length === 0) return [];
+  const targetSet = new Set(targets);
+
+  const union = new Set<string>();
+  for (const t of targets) {
+    if (!idx.nodes.has(t)) continue;
+    const reached = bfsForward(idx.rev, t);
+    // Prolog's reaches(X, target) holds for X=target only when there's at
+    // least one self-loop, so emit `t` iff it has a real self-edge. Any
+    // other resolved target of the same unqualified name is still
+    // filtered so a multi-match query doesn't return the targets
+    // themselves as "affected".
+    const selfLoop = idx.adj.get(t)?.includes(t) ?? false;
+    for (const n of reached) {
+      if (n === t) {
+        if (selfLoop) union.add(n);
+        continue;
+      }
+      if (targetSet.has(n)) continue;
+      union.add(n);
+    }
+  }
+  return Array.from(union);
 }
 
 /**
@@ -278,9 +365,20 @@ export function deadCode(graph: CodeGraph, entryPoints?: string[]): string[] {
   const called = new Set<string>();
   for (const c of graph.calls) called.add(c.callee);
 
+  // Entry points get resolved the same way as callers/callees targets so a
+  // user passing bare `main` matches any namespace-qualified `*/main`.
   const entries = new Set<string>();
   if (entryPoints && entryPoints.length > 0) {
-    for (const ep of entryPoints) entries.add(ep);
+    for (const ep of entryPoints) {
+      const resolved = resolveTargets(graph, ep);
+      if (resolved.length === 0) {
+        // Unknown entry point — honor it verbatim so the caller isn't
+        // silently ignored.
+        entries.add(ep);
+      } else {
+        for (const r of resolved) entries.add(r);
+      }
+    }
   } else {
     for (const e of graph.exports) entries.add(e.name);
   }
@@ -298,12 +396,14 @@ export function deadCode(graph: CodeGraph, entryPoints?: string[]): string[] {
   return dead;
 }
 
-/** Direct callers of `target` — de-duplicated. */
+/** Direct callers of `target`, deduplicated. Unqualified targets match any namespace-qualified suffix. */
 export function callers(graph: CodeGraph, target: string): string[] {
+  const targets = new Set(resolveTargets(graph, target));
+  if (targets.size === 0) return [];
   const seen = new Set<string>();
   const out: string[] = [];
   for (const c of graph.calls) {
-    if (c.callee === target && !seen.has(c.caller)) {
+    if (targets.has(c.callee) && !seen.has(c.caller)) {
       seen.add(c.caller);
       out.push(c.caller);
     }
@@ -311,12 +411,14 @@ export function callers(graph: CodeGraph, target: string): string[] {
   return out;
 }
 
-/** Direct callees of `source` — de-duplicated. */
+/** Direct callees of `source`, deduplicated. Unqualified source matches any namespace-qualified suffix. */
 export function callees(graph: CodeGraph, source: string): string[] {
+  const sources = new Set(resolveTargets(graph, source));
+  if (sources.size === 0) return [];
   const seen = new Set<string>();
   const out: string[] = [];
   for (const c of graph.calls) {
-    if (c.caller === source && !seen.has(c.callee)) {
+    if (sources.has(c.caller) && !seen.has(c.callee)) {
       seen.add(c.callee);
       out.push(c.callee);
     }

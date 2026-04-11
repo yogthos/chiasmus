@@ -119,6 +119,61 @@ describe("extractGraph", () => {
     expect(graph.imports.every((i) => i.source === "./db")).toBe(true);
   });
 
+  it("records function-reference usage so callbacks don't look dead", async () => {
+    // The old extractor only tracked call_expression nodes, so a function
+    // passed by reference (arr.map(fn), process.on('sig', fn)) looked dead
+    // because no caller→fn edge existed.
+    const graph = await extractGraph([{
+      path: "test.ts",
+      content: `
+        function quoteIfNeeded(s: string) { return s; }
+        function shutdown() { return 0; }
+        function format(names: string[]) {
+          return names.map(quoteIfNeeded);
+        }
+        function main() {
+          process.on("SIGINT", shutdown);
+        }
+      `,
+    }]);
+
+    const { deadCode } = await import("../../src/graph/native-analyses.js");
+    const dead = deadCode(graph);
+    expect(dead).not.toContain("quoteIfNeeded");
+    expect(dead).not.toContain("shutdown");
+
+    // Also: callers() should find the argument-level usage.
+    const { callers } = await import("../../src/graph/native-analyses.js");
+    expect(callers(graph, "quoteIfNeeded")).toContain("format");
+    expect(callers(graph, "shutdown")).toContain("main");
+  });
+
+  it("resolves renamed imports ({ foo as bar } → call bar() edges to foo)", async () => {
+    // The bug this guards against: extractor recorded the call as going to
+    // the *local* alias `bar`, so `callers("foo")` returned nothing.
+    // With alias resolution, the call edge points at the original export
+    // name and cross-file analysis sees the link.
+    const graph = await extractGraph([
+      {
+        path: "consumer.ts",
+        content: `
+          import { impact as nativeImpact } from './nat';
+          export function runAnalysis() { nativeImpact("target"); }
+        `,
+      },
+      {
+        path: "nat.ts",
+        content: `export function impact(name: string) { return name; }`,
+      },
+    ]);
+
+    const callPairs = graph.calls.map((c) => `${c.caller}->${c.callee}`);
+    expect(callPairs).toContain("runAnalysis->impact");
+    // The aliased local name must NOT appear as a callee — that would mean
+    // the rewrite didn't happen.
+    expect(callPairs).not.toContain("runAnalysis->nativeImpact");
+  });
+
   it("extracts export statements", async () => {
     const graph = await extractGraph([{
       path: "test.ts",
