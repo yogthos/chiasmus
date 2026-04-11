@@ -75,6 +75,20 @@ export class SkillLibrary {
       )
     `);
 
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS skill_templates (
+        name TEXT PRIMARY KEY,
+        domain TEXT NOT NULL,
+        solver TEXT NOT NULL,
+        signature TEXT NOT NULL,
+        skeleton TEXT NOT NULL,
+        slots TEXT NOT NULL,
+        normalizations TEXT NOT NULL,
+        tips TEXT,
+        example TEXT
+      )
+    `);
+
     // Load starter templates and ensure metadata rows exist
     const templates = new Map<string, SkillTemplate>();
     const upsert = db.prepare(`
@@ -86,6 +100,36 @@ export class SkillLibrary {
     for (const t of STARTER_TEMPLATES) {
       templates.set(t.name, t);
       upsert.run(t.name);
+    }
+
+    // Load any learned/crafted templates previously persisted to disk.
+    // Starter templates take precedence if a name collision ever occurred.
+    const rows = db
+      .prepare("SELECT * FROM skill_templates")
+      .all() as Array<{
+        name: string;
+        domain: string;
+        solver: string;
+        signature: string;
+        skeleton: string;
+        slots: string;
+        normalizations: string;
+        tips: string | null;
+        example: string | null;
+      }>;
+    for (const row of rows) {
+      if (templates.has(row.name)) continue;
+      templates.set(row.name, {
+        name: row.name,
+        domain: row.domain,
+        solver: row.solver as SolverType,
+        signature: row.signature,
+        skeleton: row.skeleton,
+        slots: JSON.parse(row.slots),
+        normalizations: JSON.parse(row.normalizations),
+        tips: row.tips ? JSON.parse(row.tips) : undefined,
+        example: row.example ?? undefined,
+      });
     }
 
     return new SkillLibrary(db, templates);
@@ -170,6 +214,27 @@ export class SkillLibrary {
 
     this.templates.set(template.name, template);
 
+    // Persist template definition so it survives restarts. Use INSERT OR IGNORE
+    // so we never clobber an existing row if the disk and in-memory state
+    // somehow diverge.
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO skill_templates
+         (name, domain, solver, signature, skeleton, slots, normalizations, tips, example)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        template.name,
+        template.domain,
+        template.solver,
+        template.signature,
+        template.skeleton,
+        JSON.stringify(template.slots),
+        JSON.stringify(template.normalizations),
+        template.tips ? JSON.stringify(template.tips) : null,
+        template.example ?? null,
+      );
+
     this.db
       .prepare(
         `INSERT INTO skill_metadata (name, promoted)
@@ -219,6 +284,7 @@ export class SkillLibrary {
     this.templates.delete(name);
     this.metadataCache.delete(name);
     this.db.prepare("DELETE FROM skill_metadata WHERE name = ?").run(name);
+    this.db.prepare("DELETE FROM skill_templates WHERE name = ?").run(name);
     this.rebuildSearchIndex();
   }
 

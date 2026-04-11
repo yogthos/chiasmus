@@ -29,6 +29,8 @@ export interface AnalysisRequest {
 export interface AnalysisResult {
   analysis: AnalysisType;
   result: unknown;
+  /** Non-fatal issues encountered while loading source files (missing, unreadable, oversized). */
+  warnings?: string[];
 }
 
 /** Run a graph analysis on the given source files */
@@ -38,55 +40,47 @@ export async function runAnalysis(
 ): Promise<AnalysisResult> {
   // Read files from disk with size check
   const files: Array<{ path: string; content: string }> = [];
+  const warnings: string[] = [];
   for (const p of filePaths) {
     try {
       const stat = statSync(p);
       if (stat.size > MAX_FILE_SIZE) {
-        continue; // skip oversized files
+        warnings.push(`Skipped ${p}: file exceeds ${MAX_FILE_SIZE} bytes`);
+        continue;
       }
       files.push({ path: p, content: readFileSync(p, "utf-8") });
-    } catch {
-      continue; // skip unreadable files
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      warnings.push(`Skipped ${p}: ${msg}`);
     }
   }
 
+  // If the caller supplied paths but nothing survived the filter, surface
+  // an explicit error rather than silently returning an empty graph —
+  // callers would otherwise see `{ functions: 0 }` and assume success.
+  if (filePaths.length > 0 && files.length === 0) {
+    return {
+      analysis: request.analysis,
+      result: { error: "No files could be read" },
+      warnings,
+    };
+  }
+
   const graph = await extractGraph(files);
-  const program = graphToProlog(graph, request.entryPoints);
-
-  if (request.analysis === "facts") {
-    return { analysis: "facts", result: program };
-  }
-
-  if (request.analysis === "summary") {
-    return {
-      analysis: "summary",
-      result: buildSummary(graph),
-    };
-  }
-
-  if (request.analysis === "layer-violation") {
-    return {
-      analysis: "layer-violation",
-      result: findLayerViolations(graph),
-    };
-  }
-
-  const query = buildQuery(request);
-  if (!query) {
-    return { analysis: request.analysis, result: { error: "Missing required parameters" } };
-  }
-
-  const solver = createPrologSolver();
-  try {
-    const solverResult = await solver.solve({ type: "prolog", program, query, maxInferences: GRAPH_MAX_INFERENCES });
-    return { analysis: request.analysis, result: formatResult(request.analysis, solverResult) };
-  } finally {
-    solver.dispose();
-  }
+  const base = await runOnGraph(graph, request);
+  return warnings.length > 0 ? { ...base, warnings } : base;
 }
 
 /** Also accept pre-built graph + program for testing without file I/O */
 export async function runAnalysisFromGraph(
+  graph: CodeGraph,
+  request: AnalysisRequest,
+): Promise<AnalysisResult> {
+  return runOnGraph(graph, request);
+}
+
+/** Core analysis pipeline — shared by runAnalysis and runAnalysisFromGraph. */
+async function runOnGraph(
   graph: CodeGraph,
   request: AnalysisRequest,
 ): Promise<AnalysisResult> {
@@ -111,7 +105,12 @@ export async function runAnalysisFromGraph(
 
   const solver = createPrologSolver();
   try {
-    const solverResult = await solver.solve({ type: "prolog", program, query, maxInferences: GRAPH_MAX_INFERENCES });
+    const solverResult = await solver.solve({
+      type: "prolog",
+      program,
+      query,
+      maxInferences: GRAPH_MAX_INFERENCES,
+    });
     return { analysis: request.analysis, result: formatResult(request.analysis, solverResult) };
   } finally {
     solver.dispose();
@@ -206,7 +205,7 @@ function buildQuery(request: AnalysisRequest): string | null {
       return "dead(X).";
 
     case "cycles":
-      return "reaches(X, X).";
+      return "func_reaches(X, X).";
 
     case "path":
       if (!request.from || !request.to) return null;

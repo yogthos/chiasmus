@@ -8,7 +8,7 @@ const require = createRequire(import.meta.url);
 
 const adapters = new Map<string, LanguageAdapter>();
 const extToLanguage = new Map<string, string>();
-let discovered = false;
+let discoveryPromise: Promise<void> | null = null;
 
 /** Register a custom language adapter */
 export function registerAdapter(adapter: LanguageAdapter): void {
@@ -40,17 +40,24 @@ export function getAdapterExtensions(): string[] {
 export function clearAdapters(): void {
   adapters.clear();
   extToLanguage.clear();
-  discovered = false;
+  discoveryPromise = null;
 }
 
 /**
  * Auto-discover adapters from node_modules (chiasmus-adapter-*) and
  * optional searchPaths exported by discovered adapters.
+ *
+ * Concurrent callers share the single in-flight promise, so test harnesses
+ * or parallel initialization paths all wait on the same underlying scan
+ * instead of racing to a half-populated registry.
  */
-export async function discoverAdapters(): Promise<void> {
-  if (discovered) return;
-  discovered = true;
+export function discoverAdapters(): Promise<void> {
+  if (discoveryPromise) return discoveryPromise;
+  discoveryPromise = runDiscovery();
+  return discoveryPromise;
+}
 
+async function runDiscovery(): Promise<void> {
   // Find node_modules relative to this package
   let nodeModulesDir: string;
   try {

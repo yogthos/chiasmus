@@ -175,4 +175,73 @@ describe("SkillLibrary", () => {
       expect(result).toBeNull();
     });
   });
+
+  describe("learned template persistence", () => {
+    const learnedTemplate = {
+      name: "test-learned-template",
+      domain: "validation",
+      solver: "prolog" as const,
+      signature: "a reusable template added at runtime",
+      skeleton: "fact({{SLOT:subject}}).\n?- fact(X).",
+      slots: [
+        { name: "subject", description: "the subject atom", format: "atom" },
+      ],
+      normalizations: [
+        { source: "string", transform: "lowercase" },
+      ],
+      tips: ["remember the period"],
+      example: "fact(foo).\n?- fact(X).",
+    };
+
+    it("persists learned templates across library instances", async () => {
+      const added = library.addLearned(learnedTemplate);
+      expect(added).toBe(true);
+      library.close();
+
+      const library2 = await SkillLibrary.create(tempDir);
+      const result = library2.get("test-learned-template");
+      expect(result).not.toBeNull();
+      expect(result!.template.name).toBe("test-learned-template");
+      expect(result!.template.skeleton).toBe(learnedTemplate.skeleton);
+      expect(result!.template.slots).toEqual(learnedTemplate.slots);
+      expect(result!.template.normalizations).toEqual(learnedTemplate.normalizations);
+      expect(result!.template.tips).toEqual(learnedTemplate.tips);
+      expect(result!.template.example).toBe(learnedTemplate.example);
+      expect(result!.metadata.promoted).toBe(false);
+      library2.close();
+    });
+
+    it("persists promoted state across library instances", async () => {
+      library.addLearned(learnedTemplate);
+      library.promote("test-learned-template");
+      library.close();
+
+      const library2 = await SkillLibrary.create(tempDir);
+      const result = library2.get("test-learned-template");
+      expect(result).not.toBeNull();
+      expect(result!.metadata.promoted).toBe(true);
+      library2.close();
+    });
+
+    it("remove() deletes the template from disk", async () => {
+      library.addLearned(learnedTemplate);
+      library.remove("test-learned-template");
+      library.close();
+
+      const library2 = await SkillLibrary.create(tempDir);
+      expect(library2.get("test-learned-template")).toBeNull();
+      library2.close();
+    });
+
+    it("reloaded templates are searchable", async () => {
+      library.addLearned(learnedTemplate);
+      library.close();
+
+      const library2 = await SkillLibrary.create(tempDir);
+      const results = library2.search("reusable template runtime");
+      const names = results.map((r) => r.template.name);
+      expect(names).toContain("test-learned-template");
+      library2.close();
+    });
+  });
 });

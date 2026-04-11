@@ -38,6 +38,18 @@ path(A, B, Path) :- path(A, B, [A], Path).
 path(A, B, _, [A, B]) :- calls(A, B).
 path(A, B, Visited, [A|Rest]) :- calls(A, Mid), \\+ member(Mid, Visited), path(Mid, B, [Mid|Visited], Rest).
 
+% Function-only reachability (for cycle detection).
+% Methods are excluded because unqualified method names collide across
+% classes — e.g. Map.get and SkillLibrary.get both resolve to "get" in the
+% extractor, producing phantom self-loops. An edge is considered
+% function-level only if neither endpoint is explicitly kind=method; nodes
+% with no defines entry are treated as functions so callers without a file
+% (test fixtures, unknowns) still participate.
+func_calls(A, B) :- calls(A, B), \\+ defines(_, A, method, _), \\+ defines(_, B, method, _).
+func_reaches(A, B) :- func_reaches(A, B, [A]).
+func_reaches(A, B, _) :- func_calls(A, B).
+func_reaches(A, B, Visited) :- func_calls(A, Mid), \\+ member(Mid, Visited), func_reaches(Mid, B, [Mid|Visited]).
+
 % Dead code: defined function not called by anyone and not an entry point.
 % Note: only kind=function is considered — methods (kind=method) are excluded
 % because they're typically dispatched dynamically (this.foo(), obj.foo()),

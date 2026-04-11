@@ -1,5 +1,8 @@
-import { describe, it, expect } from "vitest";
-import { runAnalysisFromGraph } from "../../src/graph/analyses.js";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { runAnalysis, runAnalysisFromGraph } from "../../src/graph/analyses.js";
 import type { CodeGraph } from "../../src/graph/types.js";
 
 function makeGraph(overrides: Partial<CodeGraph> = {}): CodeGraph {
@@ -110,6 +113,72 @@ describe("runAnalysisFromGraph", () => {
     expect(cycleNodes).toContain("c");
   });
 
+  it("cycles ignores phantom self-loops through method name collisions", async () => {
+    // Regression: the tree-sitter extractor collapses `obj.method()` to just
+    // `method`, so an unrelated function that calls `session.solve()` appears
+    // to share a node with `Engine.solve()` — which can call back through
+    // `correctionLoop` and create a phantom cycle. Restricting the cycles
+    // query to edges where neither endpoint is a method kills this noise.
+    const graph = makeGraph({
+      defines: [
+        { file: "loop.ts", name: "correctionLoop", kind: "function", line: 1 },
+        { file: "session.ts", name: "solve", kind: "method", line: 10 },
+        { file: "engine.ts", name: "solve", kind: "method", line: 20 },
+      ],
+      calls: [
+        // correctionLoop → session.solve (collapsed to "solve")
+        { caller: "correctionLoop", callee: "solve" },
+        // engine.solve → correctionLoop (real call)
+        { caller: "solve", callee: "correctionLoop" },
+      ],
+    });
+
+    const r = await runAnalysisFromGraph(graph, { analysis: "cycles" });
+    const cycleNodes = r.result as string[];
+    expect(cycleNodes).not.toContain("correctionLoop");
+    expect(cycleNodes).not.toContain("solve");
+  });
+
+  it("cycles still detects real cycles that go through functions only", async () => {
+    const graph = makeGraph({
+      defines: [
+        { file: "t.ts", name: "foo", kind: "function", line: 1 },
+        { file: "t.ts", name: "bar", kind: "function", line: 2 },
+      ],
+      calls: [
+        { caller: "foo", callee: "bar" },
+        { caller: "bar", callee: "foo" },
+      ],
+    });
+
+    const r = await runAnalysisFromGraph(graph, { analysis: "cycles" });
+    const cycleNodes = r.result as string[];
+    expect(cycleNodes).toContain("foo");
+    expect(cycleNodes).toContain("bar");
+  });
+
+  it("cycles ignores a cycle whose intermediate hop is a method", async () => {
+    const graph = makeGraph({
+      defines: [
+        { file: "t.ts", name: "a", kind: "function", line: 1 },
+        { file: "t.ts", name: "m", kind: "method", line: 2 },
+        { file: "t.ts", name: "b", kind: "function", line: 3 },
+      ],
+      calls: [
+        { caller: "a", callee: "m" },
+        { caller: "m", callee: "b" },
+        { caller: "b", callee: "a" },
+      ],
+    });
+
+    const r = await runAnalysisFromGraph(graph, { analysis: "cycles" });
+    const cycleNodes = r.result as string[];
+    // Cycle passes through `m` which is a method — excluded
+    expect(cycleNodes).not.toContain("a");
+    expect(cycleNodes).not.toContain("m");
+    expect(cycleNodes).not.toContain("b");
+  });
+
   it("path returns call chain", async () => {
     const graph = makeGraph({
       calls: [
@@ -180,5 +249,56 @@ describe("runAnalysisFromGraph", () => {
     const graph = makeGraph();
     const r = await runAnalysisFromGraph(graph, { analysis: "callers" });
     expect((r.result as any).error).toMatch(/missing/i);
+  });
+});
+
+describe("runAnalysis file I/O surface", () => {
+  let tempDir: string;
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "chiasmus-analysis-"));
+  });
+
+  afterEach(async () => {
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  it("reads a real file and returns a non-empty summary", async () => {
+    const filePath = join(tempDir, "sample.ts");
+    await writeFile(filePath, "export function foo() { return bar(); }\nfunction bar() { return 1; }\n");
+
+    const r = await runAnalysis([filePath], { analysis: "summary" });
+    const summary = r.result as any;
+    expect(summary.functions).toBeGreaterThan(0);
+    expect(r.warnings ?? []).toEqual([]);
+  });
+
+  it("reports a warning when a requested file is unreadable", async () => {
+    const missing = join(tempDir, "does-not-exist.ts");
+    const filePath = join(tempDir, "real.ts");
+    await writeFile(filePath, "function ok() {}\n");
+
+    const r = await runAnalysis([filePath, missing], { analysis: "summary" });
+    expect(r.warnings).toBeDefined();
+    expect(r.warnings!.length).toBe(1);
+    expect(r.warnings![0]).toContain("does-not-exist.ts");
+  });
+
+  it("returns an error result when every requested file is unreadable", async () => {
+    const bogus = [
+      join(tempDir, "nope-1.ts"),
+      join(tempDir, "nope-2.ts"),
+    ];
+    const r = await runAnalysis(bogus, { analysis: "summary" });
+    expect((r.result as any).error).toMatch(/no files/i);
+    expect(r.warnings).toBeDefined();
+    expect(r.warnings!.length).toBe(2);
+  });
+
+  it("an empty filePaths list is not an error — returns empty summary with no warnings", async () => {
+    const r = await runAnalysis([], { analysis: "summary" });
+    const summary = r.result as any;
+    expect(summary.functions).toBe(0);
+    expect(r.warnings ?? []).toEqual([]);
   });
 });
