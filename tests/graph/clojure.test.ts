@@ -73,7 +73,11 @@ describe("Clojure support", () => {
       expect(callPairs).toContain("b->c");
     });
 
-    it("extracts namespace-qualified calls (db/query → query)", async () => {
+    it("preserves namespace-qualified callees (db/query stays qualified)", async () => {
+      // No (ns ...) form in this file, so aliases can't resolve — the raw
+      // `db/query` shape should survive to the callee. The previous behavior
+      // silently stripped the namespace, collapsing cross-ns calls into
+      // bare-name collisions.
       const graph = await extractGraph([{
         path: "core.clj",
         content: `
@@ -84,8 +88,8 @@ describe("Clojure support", () => {
       }]);
 
       const callees = graph.calls.filter((c) => c.caller === "handler").map((c) => c.callee);
-      expect(callees).toContain("query");
-      expect(callees).toContain("check");
+      expect(callees).toContain("db/query");
+      expect(callees).toContain("auth/check");
     });
 
     it("extracts require imports from ns form", async () => {
@@ -130,10 +134,73 @@ describe("Clojure support", () => {
         },
       ]);
 
-      // Cross-file: handler calls query, query calls execute
+      // Cross-file: handler calls query, query calls execute — fully qualified
       const callPairs = graph.calls.map((c) => `${c.caller}->${c.callee}`);
-      expect(callPairs).toContain("handler->query");
-      expect(callPairs).toContain("query->execute");
+      expect(callPairs).toContain("myapp.core/handler->myapp.db/query");
+      expect(callPairs).toContain("myapp.db/query->myapp.db/execute");
+    });
+
+    it("qualifies same-named defns across namespaces to avoid collision (from-input-stream pattern)", async () => {
+      const graph = await extractGraph([
+        {
+          path: "hash.clj",
+          content: `
+(ns toda.hash)
+
+(defn from-input-stream [stream]
+  (consume stream))
+
+(defn- consume [s] s)
+
+(defn multi-from-input-stream [stream]
+  (from-input-stream stream))
+          `,
+        },
+        {
+          path: "packet.clj",
+          content: `
+(ns toda.packet
+  (:require [toda.hash :as h]))
+
+(defn from-input-stream [stream]
+  (h/from-input-stream stream))
+          `,
+        },
+        {
+          path: "atom.clj",
+          content: `
+(ns toda.atom
+  (:require [toda.packet :as p]))
+
+(defn from-input-stream [stream]
+  (p/from-input-stream stream))
+          `,
+        },
+      ]);
+
+      // Each namespace's from-input-stream is a distinct node.
+      const defineNames = graph.defines.map((d) => d.name);
+      expect(defineNames).toContain("toda.hash/from-input-stream");
+      expect(defineNames).toContain("toda.packet/from-input-stream");
+      expect(defineNames).toContain("toda.atom/from-input-stream");
+      // The bare name must not appear — that was the collision bug.
+      expect(defineNames).not.toContain("from-input-stream");
+
+      // Cross-file calls resolve through :require :as aliases.
+      const callPairs = graph.calls.map((c) => `${c.caller}->${c.callee}`);
+      expect(callPairs).toContain("toda.packet/from-input-stream->toda.hash/from-input-stream");
+      expect(callPairs).toContain("toda.atom/from-input-stream->toda.packet/from-input-stream");
+
+      // Same-file unqualified call resolves to current ns.
+      expect(callPairs).toContain("toda.hash/multi-from-input-stream->toda.hash/from-input-stream");
+
+      // Cycle detection must not report these as cyclic — they are a linear chain
+      // atom → packet → hash, which only collapses into a cycle if the bare names
+      // get conflated.
+      const { cycles } = await import("../../src/graph/native-analyses.js");
+      const cyclic = cycles(graph);
+      expect(cyclic).not.toContain("from-input-stream");
+      expect(cyclic.filter((n) => n.endsWith("/from-input-stream"))).toHaveLength(0);
     });
 
     it("does not treat Clojure special forms as function calls", async () => {
@@ -555,9 +622,9 @@ describe("Clojure support", () => {
         `,
       }]);
       const called = new Set(graph.calls.map((c) => c.callee));
-      expect(called).toContain("helper");
+      expect(called).toContain("foo-test/helper");
       const names = new Set(graph.defines.map((d) => d.name));
-      expect(names).toContain("my-feature-test");
+      expect(names).toContain("foo-test/my-feature-test");
     });
 
     it("does not flag test-only helpers as dead", async () => {

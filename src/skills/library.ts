@@ -63,76 +63,90 @@ export class SkillLibrary {
 
     const dbPath = join(basePath, "chiasmus.db");
     const db = new Database(dbPath);
-    db.pragma("journal_mode = WAL");
+    // Everything below `new Database(...)` acquires no new resource but
+    // can still throw (DDL conflict, JSON parse failure on a corrupt
+    // template row, etc.). Wrap it so the db handle is closed on the
+    // way out, otherwise a failed startup leaks the SQLite file lock.
+    try {
+      db.pragma("journal_mode = WAL");
 
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS skill_metadata (
-        name TEXT PRIMARY KEY,
-        reuse_count INTEGER NOT NULL DEFAULT 0,
-        success_count INTEGER NOT NULL DEFAULT 0,
-        last_used TEXT,
-        promoted INTEGER NOT NULL DEFAULT 0
-      )
-    `);
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS skill_metadata (
+          name TEXT PRIMARY KEY,
+          reuse_count INTEGER NOT NULL DEFAULT 0,
+          success_count INTEGER NOT NULL DEFAULT 0,
+          last_used TEXT,
+          promoted INTEGER NOT NULL DEFAULT 0
+        )
+      `);
 
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS skill_templates (
-        name TEXT PRIMARY KEY,
-        domain TEXT NOT NULL,
-        solver TEXT NOT NULL,
-        signature TEXT NOT NULL,
-        skeleton TEXT NOT NULL,
-        slots TEXT NOT NULL,
-        normalizations TEXT NOT NULL,
-        tips TEXT,
-        example TEXT
-      )
-    `);
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS skill_templates (
+          name TEXT PRIMARY KEY,
+          domain TEXT NOT NULL,
+          solver TEXT NOT NULL,
+          signature TEXT NOT NULL,
+          skeleton TEXT NOT NULL,
+          slots TEXT NOT NULL,
+          normalizations TEXT NOT NULL,
+          tips TEXT,
+          example TEXT
+        )
+      `);
 
-    // Load starter templates and ensure metadata rows exist
-    const templates = new Map<string, SkillTemplate>();
-    const upsert = db.prepare(`
-      INSERT INTO skill_metadata (name, promoted)
-      VALUES (?, 1)
-      ON CONFLICT(name) DO NOTHING
-    `);
+      // Load starter templates and ensure metadata rows exist
+      const templates = new Map<string, SkillTemplate>();
+      const upsert = db.prepare(`
+        INSERT INTO skill_metadata (name, promoted)
+        VALUES (?, 1)
+        ON CONFLICT(name) DO NOTHING
+      `);
 
-    for (const t of STARTER_TEMPLATES) {
-      templates.set(t.name, t);
-      upsert.run(t.name);
+      for (const t of STARTER_TEMPLATES) {
+        templates.set(t.name, t);
+        upsert.run(t.name);
+      }
+
+      // Load any learned/crafted templates previously persisted to disk.
+      // Starter templates take precedence if a name collision ever occurred.
+      const rows = db
+        .prepare("SELECT * FROM skill_templates")
+        .all() as Array<{
+          name: string;
+          domain: string;
+          solver: string;
+          signature: string;
+          skeleton: string;
+          slots: string;
+          normalizations: string;
+          tips: string | null;
+          example: string | null;
+        }>;
+      for (const row of rows) {
+        if (templates.has(row.name)) continue;
+        templates.set(row.name, {
+          name: row.name,
+          domain: row.domain,
+          solver: row.solver as SolverType,
+          signature: row.signature,
+          skeleton: row.skeleton,
+          slots: JSON.parse(row.slots),
+          normalizations: JSON.parse(row.normalizations),
+          tips: row.tips ? JSON.parse(row.tips) : undefined,
+          example: row.example ?? undefined,
+        });
+      }
+
+      return new SkillLibrary(db, templates);
+    } catch (e) {
+      try {
+        db.close();
+      } catch {
+        // best-effort: if close itself throws (already-closed, corrupt
+        // handle), there's nothing we can do — surface the original.
+      }
+      throw e;
     }
-
-    // Load any learned/crafted templates previously persisted to disk.
-    // Starter templates take precedence if a name collision ever occurred.
-    const rows = db
-      .prepare("SELECT * FROM skill_templates")
-      .all() as Array<{
-        name: string;
-        domain: string;
-        solver: string;
-        signature: string;
-        skeleton: string;
-        slots: string;
-        normalizations: string;
-        tips: string | null;
-        example: string | null;
-      }>;
-    for (const row of rows) {
-      if (templates.has(row.name)) continue;
-      templates.set(row.name, {
-        name: row.name,
-        domain: row.domain,
-        solver: row.solver as SolverType,
-        signature: row.signature,
-        skeleton: row.skeleton,
-        slots: JSON.parse(row.slots),
-        normalizations: JSON.parse(row.normalizations),
-        tips: row.tips ? JSON.parse(row.tips) : undefined,
-        example: row.example ?? undefined,
-      });
-    }
-
-    return new SkillLibrary(db, templates);
   }
 
   /** List all templates with metadata */
