@@ -124,6 +124,8 @@ chiasmus_graph files=["main.go", "handler.go"] analysis="impact" target="Query"
 
 Analyses: `summary`, `callers`, `callees`, `reachability`, `dead-code`, `cycles`, `path`, `impact`, `facts`.
 
+Reachability-heavy analyses (`cycles`, `reachability`, `path`, `impact`, `dead-code`, `callers`, `callees`) run on native O(V+E) graph algorithms and scale to codebases with thousands of functions. The `facts` analysis still emits raw Prolog for use with `chiasmus_verify`, capped at 10 MB — above that limit the result is `{ error, size, limit }` rather than a program string, so narrow the file set or call a specific analysis directly.
+
 **`chiasmus_skills`** — Search the template library. Ships with 8 starter templates covering authorization, configuration, dependency resolution, validation, rule inference, and graph reachability. By-name lookups include related template suggestions.
 
 **`chiasmus_formalize`** — Find the best template for a problem, get slot-filling instructions plus suggestions for related verification checks. Fill the slots using your context, then call `chiasmus_verify`.
@@ -381,7 +383,7 @@ library.close();
 |---------|---------|
 | `chiasmus` | All public APIs (barrel export) |
 | `chiasmus/solvers` | `SolverSession`, `createZ3Solver`, `createPrologSolver`, `correctionLoop`, solver types |
-| `chiasmus/graph` | `extractGraph`, `runAnalysis`, `runAnalysisFromGraph`, `parseMermaid`, `graphToProlog`, adapter registry, graph types |
+| `chiasmus/graph` | `extractGraph`, `runAnalysis`, `runAnalysisFromGraph`, `buildFactsResult`, `DEFAULT_FACTS_MAX_BYTES`, `parseMermaid`, `graphToProlog`, adapter registry, graph types |
 | `chiasmus/formalize` | `lintSpec`, `classifyFeedback`, `extractPrologQuery`, `FormalizationEngine`, result types |
 | `chiasmus/skills` | `SkillLibrary`, `SkillLearner`, `craftTemplate`, `validateTemplate`, skill types |
 | `chiasmus/llm` | `createLLMFromEnv`, `AnthropicAdapter`, `OpenAICompatibleAdapter`, LLM types |
