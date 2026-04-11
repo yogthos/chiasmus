@@ -68,18 +68,21 @@ export function addToIndex(index: BM25Index, text: string): void {
   index.docs.push(doc);
   index.avgLength = totalLength / index.docs.length;
 
-  // Update IDF: recompute for affected terms
+  // N changed, so every term's IDF must be recomputed — not just the ones in
+  // the new doc. A term that only appears in older docs still has its IDF
+  // formula depend on N, and leaving it stale makes scores from different
+  // adds incomparable. Collect document frequencies in a single pass, then
+  // rewrite the full idf map.
   const N = index.docs.length;
-  const seen = new Set(doc.tokens);
-
-  // First, increment doc frequency for new terms
-  for (const term of seen) {
-    // We need to count all docs containing this term — the existing IDF may be stale
-    // For incremental add, just count the new doc's contribution
-    let df = 0;
-    for (const d of index.docs) {
-      if (new Set(d.tokens).has(term)) df++;
+  const docFreq = new Map<string, number>();
+  for (const d of index.docs) {
+    const seen = new Set(d.tokens);
+    for (const term of seen) {
+      docFreq.set(term, (docFreq.get(term) ?? 0) + 1);
     }
+  }
+  index.idf.clear();
+  for (const [term, df] of docFreq) {
     index.idf.set(term, Math.log((N - df + 0.5) / (df + 0.5) + 1));
   }
 }

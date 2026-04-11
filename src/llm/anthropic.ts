@@ -1,7 +1,7 @@
 import type { LLMAdapter, LLMMessage } from "./types.js";
 import { OpenAICompatibleAdapter } from "./openai-compatible.js";
 
-const DEFAULT_MODEL = "claude-sonnet-4-20250514";
+const DEFAULT_MODEL = "claude-sonnet-4-6";
 const DEFAULT_URL = "https://api.anthropic.com/v1/messages";
 const DEFAULT_MAX_TOKENS = 4096;
 const DEFAULT_TIMEOUT_MS = 30_000;

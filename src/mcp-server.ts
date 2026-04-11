@@ -884,6 +884,38 @@ export async function createChiasmusServer(
   return { server, library, formalizer };
 }
 
+/**
+ * Wire SIGINT/SIGTERM handlers that close the SkillLibrary (which flushes
+ * SQLite WAL state) and close the MCP server before exiting. Exposed so
+ * tests can verify the registration without having to send real signals.
+ */
+export function setupShutdownHandlers(
+  server: { close: () => Promise<void> | void },
+  library: { close: () => void },
+): void {
+  let shuttingDown = false;
+  const shutdown = async (signal: NodeJS.Signals): Promise<void> => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    try {
+      await server.close();
+    } catch (e) {
+      console.error(`[Chiasmus] server close failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    try {
+      library.close();
+    } catch (e) {
+      console.error(`[Chiasmus] library close failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    // Preserve the signal convention: exit code 128 + signal number.
+    const code = signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : 0;
+    process.exit(code);
+  };
+
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+}
+
 // CLI entry point — detect if run directly, via npx bin symlink, or via tsx
 import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -896,8 +928,9 @@ const isMain = resolvedArg === thisFile
   || process.argv[1]?.endsWith("mcp-server.js");
 
 if (isMain) {
-  const { server } = await createChiasmusServer();
+  const { server, library } = await createChiasmusServer();
   const transport = new StdioServerTransport();
   await server.connect(transport);
+  setupShutdownHandlers(server, library);
   console.error("[Chiasmus] MCP server running on stdio");
 }

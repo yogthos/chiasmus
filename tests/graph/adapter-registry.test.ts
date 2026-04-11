@@ -203,6 +203,18 @@ describe("discoverAdapters", () => {
     await discoverAdapters();
     expect(getAdapter("test-lang")).not.toBeNull();
   });
+
+  it("concurrent callers share the same in-flight discovery promise", async () => {
+    // Regression: the original implementation set a boolean flag and then
+    // continued asynchronously, so a second caller invoked while the first
+    // was still scanning would return immediately before scanning completed.
+    // Both calls must resolve to the same promise object (same instance)
+    // so every caller awaits the single in-flight scan.
+    const p1 = discoverAdapters();
+    const p2 = discoverAdapters();
+    expect(p1).toBe(p2);
+    await Promise.all([p1, p2]);
+  });
 });
 
 describe("searchPaths", () => {
