@@ -174,7 +174,7 @@ Each action carries an `interpret` field describing how to score the result. Aft
 
 ## Recommended Workflow
 
-The calling LLM (Claude, GPT, etc.) drives the process — no API key needed:
+The calling LLM (GLM, GPT, etc.) drives the process — no API key needed:
 
 1. `chiasmus_formalize problem="Can our RBAC rules ever conflict?"` → get template + slot instructions
 2. Fill the template slots using your knowledge of the user's codebase
