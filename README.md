@@ -122,7 +122,7 @@ chiasmus_graph files=["main.go", "handler.go"] analysis="impact" target="Query"
 → { analysis: "impact", result: ["Handle", "main"] }
 ```
 
-Analyses: `summary`, `callers`, `callees`, `reachability`, `dead-code`, `cycles`, `path`, `impact`, `facts`.
+Analyses: `summary`, `callers`, `callees`, `reachability`, `dead-code`, `cycles`, `path`, `impact`, `layer-violation`, `facts`.
 
 Reachability-heavy analyses (`cycles`, `reachability`, `path`, `impact`, `dead-code`, `callers`, `callees`) run on native O(V+E) graph algorithms and scale to codebases with thousands of functions. The `facts` analysis still emits raw Prolog for use with `chiasmus_verify`, capped at 10 MB — above that limit the result is `{ error, size, limit }` rather than a program string, so narrow the file set or call a specific analysis directly.
 
