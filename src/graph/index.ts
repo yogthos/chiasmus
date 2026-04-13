@@ -4,7 +4,7 @@ export type { AnalysisType, AnalysisRequest, AnalysisResult, FactsOversizeError 
 export { parseMermaid } from "./mermaid.js";
 export { graphToProlog, escapeAtom, BUILTIN_RULES } from "./facts.js";
 export { registerAdapter, getAdapter, getAdapterForExt, getAdapterExtensions, clearAdapters, discoverAdapters } from "./adapter-registry.js";
-export type { CodeGraph, DefinesFact, CallsFact, ImportsFact, ExportsFact, ContainsFact, FileNode, LanguageAdapter, SymbolKind } from "./types.js";
+export type { CodeGraph, DefinesFact, CallsFact, ImportsFact, ExportsFact, ContainsFact, FileNode, Hyperedge, LanguageAdapter, SymbolKind } from "./types.js";
 export {
   fileHash,
   checkFileCache,
@@ -25,3 +25,4 @@ export { detectHubs, detectBridges, detectSurprisingConnections } from "./insigh
 export type { Hub, Bridge, SurprisingConnection } from "./insights.js";
 export { graphDiff } from "./diff.js";
 export type { GraphDiffResult, GraphDiffEdge } from "./diff.js";
+export { detectEntryPoints } from "./entry-points.js";

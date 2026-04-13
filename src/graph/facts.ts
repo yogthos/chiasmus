@@ -89,6 +89,8 @@ export function graphToProlog(
   lines.push(":- dynamic(exports/2).");
   lines.push(":- dynamic(contains/2).");
   lines.push(":- dynamic(file/2).");
+  lines.push(":- dynamic(hyperedge/2).");
+  lines.push(":- dynamic(hyperedge_member/2).");
   lines.push(":- dynamic(entry_point/1).");
   lines.push("");
 
@@ -127,6 +129,17 @@ export function graphToProlog(
     lines.push(`contains(${escapeAtom(c.parent)}, ${escapeAtom(c.child)}).`);
   }
   if (graph.contains.length > 0) lines.push("");
+
+  // hyperedge(Id, Relation). + hyperedge_member(Id, Member).
+  if (graph.hyperedges && graph.hyperedges.length > 0) {
+    for (const h of graph.hyperedges) {
+      lines.push(`hyperedge(${escapeAtom(h.id)}, ${escapeAtom(h.relation)}).`);
+      for (const m of h.nodes) {
+        lines.push(`hyperedge_member(${escapeAtom(h.id)}, ${escapeAtom(m)}).`);
+      }
+    }
+    lines.push("");
+  }
 
   // Entry points
   if (entryPoints && entryPoints.length > 0) {

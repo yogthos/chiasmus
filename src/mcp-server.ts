@@ -37,7 +37,7 @@ const GRAPH_ANALYSES = [
   "dead-code", "cycles", "path", "impact",
   "layer-violation", "facts",
   "communities", "hubs", "bridges", "surprises",
-  "diff",
+  "diff", "entry-points",
 ] as const;
 
 const TOOLS = [
@@ -248,6 +248,7 @@ ANALYSES:
   bridges      — top betweenness centrality — nodes connecting otherwise separate subgraphs
   surprises    — cross-community + peripheral→hub edges (often latent coupling or design smells)
   diff         — compare current graph to a saved snapshot (needs against=<snapshot-name>)
+  entry-points — heuristic entry-point detection (zero-in-degree exports) for seeding dead-code analysis
   facts        — raw Prolog facts for custom queries via chiasmus_verify`,
     inputSchema: {
       type: "object" as const,

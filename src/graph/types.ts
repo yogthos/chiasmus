@@ -33,6 +33,24 @@ export interface FileNode {
   language: string;
 }
 
+/**
+ * A named group of 3+ nodes related by a shared relation. Examples:
+ *   - all implementations of a protocol/interface
+ *   - all handlers registered for an event channel
+ *   - all functions participating in an auth flow
+ *
+ * Hyperedges are additive over the pairwise call graph — they carry group
+ * semantics that binary edges can't express. No auto-detection today;
+ * external consumers (adapters, template authors) populate them.
+ */
+export interface Hyperedge {
+  id: string;
+  label: string;
+  nodes: string[];
+  relation: string;
+  source_file?: string;
+}
+
 export interface CodeGraph {
   defines: DefinesFact[];
   calls: CallsFact[];
@@ -40,6 +58,7 @@ export interface CodeGraph {
   exports: ExportsFact[];
   contains: ContainsFact[];
   files?: FileNode[];
+  hyperedges?: Hyperedge[];
 }
 
 /** User-provided language adapter for custom tree-sitter grammars */

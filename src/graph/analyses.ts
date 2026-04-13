@@ -5,6 +5,7 @@ import { loadSnapshot, saveSnapshot, type CacheOptions } from "./cache.js";
 import { detectCommunities } from "./community.js";
 import { detectHubs, detectBridges, detectSurprisingConnections } from "./insights.js";
 import { graphDiff } from "./diff.js";
+import { detectEntryPoints } from "./entry-points.js";
 import {
   cycles as nativeCycles,
   reachability as nativeReachability,
@@ -65,7 +66,7 @@ export type AnalysisType =
   | "dead-code" | "cycles" | "path" | "impact" | "facts"
   | "layer-violation"
   | "communities" | "hubs" | "bridges" | "surprises"
-  | "diff";
+  | "diff" | "entry-points";
 
 export interface AnalysisRequest {
   analysis: AnalysisType;
@@ -233,6 +234,9 @@ async function runOnGraph(
     case "surprises":
       return { analysis: "surprises", result: detectSurprisingConnections(graph) };
 
+    case "entry-points":
+      return { analysis: "entry-points", result: detectEntryPoints(graph) };
+
     case "diff": {
       if (!request.against) {
         return { analysis: "diff", result: { error: "Missing required parameter 'against' — specify a snapshot name to diff against" } };
@@ -316,7 +320,7 @@ function buildSummary(graph: CodeGraph) {
   const files = new Set(graph.defines.map((d) => d.file));
   const functions = graph.defines.filter((d) => d.kind === "function" || d.kind === "method").length;
   const classes = graph.defines.filter((d) => d.kind === "class").length;
-  return {
+  const summary: Record<string, number> = {
     files: files.size,
     functions,
     classes,
@@ -324,5 +328,9 @@ function buildSummary(graph: CodeGraph) {
     imports: graph.imports.length,
     exports: graph.exports.length,
   };
+  if (graph.hyperedges && graph.hyperedges.length > 0) {
+    summary.hyperedges = graph.hyperedges.length;
+  }
+  return summary;
 }
 
