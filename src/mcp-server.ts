@@ -228,28 +228,26 @@ Returns cleaned spec + fixes applied + remaining errors.`,
   },
   {
     name: "chiasmus_graph",
-    description: `Analyze source code call graphs via tree-sitter + Prolog.
-
-Parse source files → extract call graph → run formal analysis.
-Supports: TypeScript, JavaScript, Python, Go, Clojure. Files must be absolute paths.
+    description: `Analyze source-code call graphs (tree-sitter + Prolog). Absolute paths only.
+Languages: TypeScript, JavaScript, Python, Go, Clojure.
 
 ANALYSES:
-  summary      — overview: files, functions, call edges
-  callers      — who calls target? (needs target)
-  callees      — what does target call? (needs target)
-  reachability — can from reach to? (needs from, to)
-  dead-code    — functions unreachable from entry points (methods excluded — dynamic dispatch)
-  cycles       — circular call dependencies
-  path         — call chain from→to (needs from, to)
-  impact       — what breaks if target changes? (needs target)
-  layer-violation — calls that skip abstraction layers (handlers→db without going through services)
-  communities  — Louvain community detection: inferred module clusters with cohesion scores
-  hubs         — highest-degree nodes (refactor-sensitive centers of the call graph)
-  bridges      — top betweenness centrality — nodes connecting otherwise separate subgraphs
-  surprises    — cross-community + peripheral→hub edges (often latent coupling or design smells)
-  diff         — compare current graph to a saved snapshot (needs against=<snapshot-name>)
-  entry-points — heuristic entry-point detection (zero-in-degree exports) for seeding dead-code analysis
-  facts        — raw Prolog facts for custom queries via chiasmus_verify`,
+  summary         overview counts
+  callers         who calls target (needs target)
+  callees         what target calls (needs target)
+  reachability    can from reach to (needs from, to)
+  path            shortest chain from→to (needs from, to)
+  impact          transitive callers of target (needs target)
+  dead-code       unreachable functions (methods excluded)
+  cycles          circular call dependencies
+  layer-violation calls that skip layers (handlers→db bypassing services)
+  communities     Louvain clusters with cohesion scores
+  hubs            top-degree nodes
+  bridges         top betweenness — connect otherwise-separate subgraphs
+  surprises       cross-community + peripheral→hub edges
+  diff            current graph vs saved snapshot (needs against)
+  entry-points    zero-in-degree exports — seed dead-code
+  facts           raw Prolog for chiasmus_verify`,
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -378,24 +376,16 @@ Optional: set test=true with an example to run it through the solver.`,
   },
   {
     name: "chiasmus_review",
-    description: `Return a phased code-review recipe — which chiasmus tools and templates to run, in what order, and what to look for.
-
-Output is a structured plan (no side effects, no solver calls). Execute phases in order:
-each action names a tool + args + 'interpret' guidance. Skip phases not applicable to the codebase.
+    description: `Phased code-review recipe — which tools to run, in what order, what to flag. Pure plan, no side effects. Execute phases sequentially; each action carries 'interpret' guidance. End with a numbered issue list per the reporting section.
 
 FOCUS:
-  all           — full review (structural → architecture → security → resource → auth → correctness → impact)
-  quick         — structural overview + architecture health only
-  architecture  — dead code, cycles, layer violations, impact
-  security      — taint flow, resource pairing, auth contradictions
-  correctness   — invariants, boundaries, state machines, impact
+  all           structural → architecture → security → resource → auth → correctness → impact
+  quick         overview + architecture only
+  architecture  dead code, cycles, layer violations, impact
+  security      taint, resource pairing, auth contradictions
+  correctness   invariants, boundaries, state machines, impact
 
-WORKFLOW:
-  1. Call chiasmus_review with files + focus → get the plan
-  2. Execute each phase's actions in order using the named tools
-  3. After all phases, produce a numbered issue list with severity per the reporting section
-
-Entry points (for dead-code phase) are optional — chiasmus_graph auto-detects exports if omitted.`,
+Set delta_against=<snapshot> for PR-scoped review: a phase 0 diffs vs the snapshot and scopes later phases to changed symbols.`,
     inputSchema: {
       type: "object" as const,
       properties: {

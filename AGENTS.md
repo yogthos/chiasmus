@@ -54,12 +54,19 @@ src/
 │   ├── learner.ts         # SkillLearner — LLM-driven template extraction from solutions
 │   └── relationships.ts   # Template relationship/suggestion graph
 ├── graph/
-│   ├── types.ts           # CodeGraph, LanguageAdapter, DefinesFact, CallsFact, etc.
-│   ├── extractor.ts       # tree-sitter parsing + multi-language call graph extraction
-│   ├── parser.ts          # AST walking for TS/JS/Python/Go/Clojure
-│   ├── facts.ts           # graphToProlog — converts CodeGraph to Prolog facts + rules
-│   ├── analyses.ts        # runAnalysis — dispatches graph analyses via Prolog queries
-│   ├── mermaid.ts         # parseMermaid — converts Mermaid flowcharts/state diagrams to Prolog
+│   ├── types.ts           # CodeGraph, LanguageAdapter, FileNode, Hyperedge, DefinesFact, etc.
+│   ├── parser.ts          # tree-sitter lang registry + sync/async parse for TS/JS/Py/Go/Clojure
+│   ├── extractor.ts       # AST walking + per-language call graph extraction
+│   ├── facts.ts           # graphToProlog — CodeGraph → Prolog facts + rules
+│   ├── analyses.ts        # runAnalysis — dispatches all graph analyses
+│   ├── native-analyses.ts # O(V+E) cycles/reachability/impact/dead-code/callers/callees
+│   ├── graph-util.ts      # Shared helpers: buildUndirectedGraph, forEachUndirectedEdge, undirectedDegree
+│   ├── community.ts       # Louvain community detection + cohesion score
+│   ├── insights.ts        # detectHubs, detectBridges, detectSurprisingConnections
+│   ├── diff.ts            # graphDiff — set diff on nodes + (src,tgt) edge keys
+│   ├── entry-points.ts    # Heuristic entry-point detection (zero-in-degree exports)
+│   ├── cache.ts           # SHA256 per-file cache + LRU eviction + named snapshots (proper-lockfile)
+│   ├── mermaid.ts         # parseMermaid — Mermaid flowcharts/state diagrams → Prolog facts
 │   └── adapter-registry.ts # Auto-discovery of chiasmus-adapter-* npm packages
 ├── llm/
 │   ├── types.ts           # LLMAdapter interface, LLMMessage
@@ -214,3 +221,11 @@ describe("Z3Solver", () => {
 - Template slots use `{{SLOT:name}}` markers in skeleton strings
 - The `as any` casts on Tau Prolog session objects are intentional — the library's TypeScript types are incomplete
 - Lint tool (`formalize/validate.ts`) auto-fixes markdown fences, `(check-sat)`, `(get-model)`, `(set-logic)` before reporting errors
+
+### Graph cache
+- `saveFileCache` serializes all manifest read-modify-writes through `proper-lockfile` on `<repoDir>/.lock` — concurrent MCP dispatches don't tear the manifest
+- Per-file writes are atomic via `.tmp` + rename, parallelized with `Promise.all` inside the single lock acquisition
+- Eviction is folded into the save lock block with a manifest-sum fast path: the O(N) `fs.readdir`/`fs.stat` sweep only runs when the manifest-tracked total exceeds the per-repo budget
+- LRU uses file `mtime`; `checkFileCache` bumps it via `fs.utimes` on hits (best-effort, concurrent eviction is tolerated by the read path)
+- Snapshot names are validated against `/`, `\`, `..`, `\0` — path traversal rejected at every entry point
+- Cache schema versioned via `CACHE_SCHEMA_VERSION` in the manifest; mismatch silently invalidates all entries rather than throwing
