@@ -1,6 +1,10 @@
 import { readFileSync, statSync } from "node:fs";
 import { extractGraph } from "./extractor.js";
 import { graphToProlog } from "./facts.js";
+import { loadSnapshot, saveSnapshot, type CacheOptions } from "./cache.js";
+import { detectCommunities } from "./community.js";
+import { detectHubs, detectBridges, detectSurprisingConnections } from "./insights.js";
+import { graphDiff } from "./diff.js";
 import {
   cycles as nativeCycles,
   reachability as nativeReachability,
@@ -58,7 +62,9 @@ export function buildFactsResult(
 export type AnalysisType =
   | "summary" | "callers" | "callees" | "reachability"
   | "dead-code" | "cycles" | "path" | "impact" | "facts"
-  | "layer-violation";
+  | "layer-violation"
+  | "communities" | "hubs" | "bridges" | "surprises"
+  | "diff";
 
 export interface AnalysisRequest {
   analysis: AnalysisType;
@@ -66,6 +72,20 @@ export interface AnalysisRequest {
   from?: string;
   to?: string;
   entryPoints?: string[];
+  /** Snapshot name to diff against (required when analysis="diff"). */
+  against?: string;
+  /**
+   * When set, the extracted graph is saved under this snapshot name after
+   * analysis completes. Useful for capturing a baseline ("main") that a
+   * later `diff` call can compare against.
+   */
+  saveSnapshot?: string;
+  /**
+   * Enable persistent per-file extraction cache. Supply an object (with
+   * optional cacheDir/repoKey/budget overrides) to opt in. Omit or pass
+   * undefined to extract fresh every call.
+   */
+  cache?: CacheOptions;
 }
 
 export interface AnalysisResult {
@@ -108,7 +128,24 @@ export async function runAnalysis(
     };
   }
 
-  const graph = await extractGraph(files);
+  const graph = await extractGraph(files, request.cache ? { cache: request.cache } : {});
+
+  if (request.saveSnapshot) {
+    if (!request.cache) {
+      warnings.push(
+        "saveSnapshot ignored: cache option is required to persist snapshots",
+      );
+    } else {
+      try {
+        await saveSnapshot(request.saveSnapshot, graph, request.cache);
+      } catch (e: unknown) {
+        warnings.push(
+          `Failed to save snapshot ${request.saveSnapshot}: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+    }
+  }
+
   const base = await runOnGraph(graph, request);
   return warnings.length > 0 ? { ...base, warnings } : base;
 }
@@ -171,6 +208,32 @@ async function runOnGraph(
     case "impact":
       if (!request.target) return missingParams("impact");
       return { analysis: "impact", result: nativeImpact(graph, request.target) };
+
+    case "communities":
+      return { analysis: "communities", result: detectCommunities(graph) };
+
+    case "hubs":
+      return { analysis: "hubs", result: detectHubs(graph) };
+
+    case "bridges":
+      return { analysis: "bridges", result: detectBridges(graph) };
+
+    case "surprises":
+      return { analysis: "surprises", result: detectSurprisingConnections(graph) };
+
+    case "diff": {
+      if (!request.against) {
+        return { analysis: "diff", result: { error: "Missing required parameter 'against' — specify a snapshot name to diff against" } };
+      }
+      if (!request.cache) {
+        return { analysis: "diff", result: { error: "diff requires a cache option so snapshots can be located on disk" } };
+      }
+      const baseline = await loadSnapshot(request.against, request.cache);
+      if (!baseline) {
+        return { analysis: "diff", result: { error: `Snapshot '${request.against}' not found. Save one first via saveSnapshot.` } };
+      }
+      return { analysis: "diff", result: graphDiff(baseline, graph) };
+    }
 
     default:
       return { analysis: request.analysis, result: { error: `Unknown analysis: ${request.analysis}` } };

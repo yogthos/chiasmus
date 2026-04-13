@@ -1,4 +1,6 @@
 import type { CodeGraph } from "./types.js";
+import { detectCommunities } from "./community.js";
+import { detectHubs, detectBridges } from "./insights.js";
 
 /** Escape a string for use as a Prolog atom (single-quoted if needed) */
 export function escapeAtom(s: string): string {
@@ -61,8 +63,23 @@ caller_of(Target, Caller) :- calls(Caller, Target).
 callee_of(Source, Callee) :- calls(Source, Callee).
 `.trim();
 
+export interface PrologOptions {
+  /**
+   * Include derived-structure facts (community/2, cohesion/2, hub/2,
+   * bridge/2) in the fact dump. Default false — these add O(V+E) work and
+   * bloat the facts output; callers that need them should opt in. When
+   * false, chiasmus_verify can still query them by running the respective
+   * analyses directly.
+   */
+  includeInsights?: boolean;
+}
+
 /** Convert a CodeGraph to a Prolog program string */
-export function graphToProlog(graph: CodeGraph, entryPoints?: string[]): string {
+export function graphToProlog(
+  graph: CodeGraph,
+  entryPoints?: string[],
+  opts: PrologOptions = {},
+): string {
   const lines: string[] = [];
 
   // Dynamic declarations
@@ -71,8 +88,15 @@ export function graphToProlog(graph: CodeGraph, entryPoints?: string[]): string 
   lines.push(":- dynamic(imports/3).");
   lines.push(":- dynamic(exports/2).");
   lines.push(":- dynamic(contains/2).");
+  lines.push(":- dynamic(file/2).");
   lines.push(":- dynamic(entry_point/1).");
   lines.push("");
+
+  // file(Path, Language).
+  for (const f of graph.files ?? []) {
+    lines.push(`file(${escapeAtom(f.path)}, ${escapeAtom(f.language)}).`);
+  }
+  if (graph.files && graph.files.length > 0) lines.push("");
 
   // defines(File, Name, Kind, Line).
   for (const d of graph.defines) {
@@ -117,6 +141,30 @@ export function graphToProlog(graph: CodeGraph, entryPoints?: string[]): string 
     }
   }
   lines.push("");
+
+  // Insight facts (opt-in via opts.includeInsights).
+  if (opts.includeInsights) {
+    const communities = detectCommunities(graph);
+    for (const c of communities) {
+      lines.push(`cohesion(${c.id}, ${c.cohesion}).`);
+      for (const m of c.members) {
+        lines.push(`community(${escapeAtom(m)}, ${c.id}).`);
+      }
+    }
+    if (communities.length > 0) lines.push("");
+
+    const hubs = detectHubs(graph);
+    for (const h of hubs) {
+      lines.push(`hub(${escapeAtom(h.name)}, ${h.degree}).`);
+    }
+    if (hubs.length > 0) lines.push("");
+
+    const bridges = detectBridges(graph);
+    for (const b of bridges) {
+      lines.push(`bridge(${escapeAtom(b.name)}, ${b.score.toFixed(4)}).`);
+    }
+    if (bridges.length > 0) lines.push("");
+  }
 
   // Built-in rules
   lines.push(BUILTIN_RULES);

@@ -76,8 +76,13 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
+    "@types/proper-lockfile": "^4.1.4",
     "@yogthos/tree-sitter-clojure": "^0.0.14",
     "better-sqlite3": "^12.8.0",
+    "graphology": "^0.26.0",
+    "graphology-communities-louvain": "^2.0.2",
+    "graphology-metrics": "^2.4.0",
+    "proper-lockfile": "^4.1.2",
     "repl-sandbox": "^0.1.1",
     "tau-prolog": "^0.3.4",
     "tree-sitter": "^0.22.4",
@@ -91,6 +96,7 @@
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.0.0",
+    "graphology-types": "^0.24.8",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0",
     "vitest": "^4.0.17"

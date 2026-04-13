@@ -28,12 +28,18 @@ export interface ContainsFact {
   child: string;
 }
 
+export interface FileNode {
+  path: string;
+  language: string;
+}
+
 export interface CodeGraph {
   defines: DefinesFact[];
   calls: CallsFact[];
   imports: ImportsFact[];
   exports: ExportsFact[];
   contains: ContainsFact[];
+  files?: FileNode[];
 }
 
 /** User-provided language adapter for custom tree-sitter grammars */

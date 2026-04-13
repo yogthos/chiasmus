@@ -17,6 +17,14 @@ export interface ReviewRequest {
   files: string[];
   focus?: ReviewFocus;
   entry_points?: string[];
+  /**
+   * When set, a PR-delta phase runs first: the current extracted graph is
+   * diffed against the named snapshot (typically "main"), and the changed
+   * symbols become the recommended focus of subsequent phases. Requires
+   * that a snapshot with this name was previously saved via
+   * chiasmus_graph save_snapshot=<name>.
+   */
+  delta_against?: string;
 }
 
 export interface ReviewAction {
@@ -76,7 +84,7 @@ export function buildReviewPlan(request: ReviewRequest): ReviewPlan {
     );
   }
 
-  const { files, entry_points } = request;
+  const { files, entry_points, delta_against } = request;
 
   const phaseOverview = makeOverviewPhase(files);
   const phaseArchitecture = makeArchitecturePhase(files, entry_points);
@@ -114,13 +122,17 @@ export function buildReviewPlan(request: ReviewRequest): ReviewPlan {
       break;
   }
 
+  if (delta_against) {
+    phases.unshift(makeDeltaPhase(files, delta_against));
+  }
+
   return {
     files,
     focus,
     summary: buildSummary(focus, phases.length),
     phases,
     suggestedTemplates: pickSuggestedTemplates(focus),
-    reporting: buildReporting(),
+    reporting: buildReporting(delta_against),
   };
 }
 
@@ -131,6 +143,41 @@ function buildSummary(focus: ReviewFocus, phaseCount: number): string {
     `then apply the 'interpret' guidance to decide whether to flag the result as an issue. ` +
     `After all phases, produce the final report per the 'reporting' section.`
   );
+}
+
+function makeDeltaPhase(files: string[], against: string): ReviewPhase {
+  return {
+    phase: "0. PR delta scope",
+    goal:
+      "Compare the current code against a previously saved snapshot (usually the base branch) " +
+      "to identify which symbols this PR adds, removes, or rewires. The delta drives the later " +
+      "phases — expensive analyses (taint, invariant checks, impact) focus on changed symbols " +
+      "instead of the entire codebase. Cross-module rewiring flagged here is frequently the " +
+      "root cause of regressions.",
+    actions: [
+      {
+        tool: "chiasmus_graph",
+        args: { files, analysis: "diff", against, cache: true },
+        interpret:
+          `Returns { addedNodes, removedNodes, addedEdges, removedEdges, summary }. Requires a ` +
+          `snapshot named '${against}' to exist (created earlier via chiasmus_graph save_snapshot='${against}' on the base branch). ` +
+          `If the result is { error: 'Snapshot ... not found' }, ask the user to run a baseline extraction first, then skip this phase. ` +
+          `Treat every name in addedNodes as a primary review target for the later phases — pass them as focus targets where applicable. ` +
+          `Each addedEdge crossing module boundaries (the surprises analysis identifies these) is a candidate architectural regression: ` +
+          `escalate to MEDIUM by default, HIGH if the endpoint is a public API. ` +
+          `Each removedNode should be impact-checked against the current graph: if callers outside the PR still reference it, flag CRITICAL (broken symbol).`,
+      },
+      {
+        tool: "chiasmus_graph",
+        args: { files, analysis: "impact", target: "<REMOVED_NODE>" },
+        interpret:
+          "Run this once per entry in removedNodes, substituting the name for <REMOVED_NODE>. " +
+          "Non-empty result means the PR deletes a symbol that is still referenced somewhere — " +
+          "either the callers were supposed to be updated too (PR is incomplete) or the analysis " +
+          "is missing the migration file (double-check file set). Severity: CRITICAL.",
+      },
+    ],
+  };
 }
 
 function makeOverviewPhase(files: string[]): ReviewPhase {
@@ -433,12 +480,18 @@ function pickSuggestedTemplates(focus: ReviewFocus): SuggestedTemplate[] {
   }
 }
 
-function buildReporting(): ReviewReporting {
+function buildReporting(deltaAgainst?: string): ReviewReporting {
+  const deltaLine = deltaAgainst
+    ? "\n  0. **Changes in this PR**: lead with the graph_diff summary from phase 0 — added " +
+      "symbols, removed symbols, rewired edges. Reviewers should open with what changed before " +
+      "hearing about every defect.\n"
+    : "";
   return {
     format: "Numbered issue list with severity",
     severityLevels: ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"],
     instructions:
       "After executing all phases, produce a final report. Structure:\n" +
+      deltaLine +
       "  1. **Summary**: one-paragraph overview of the codebase and the review scope.\n" +
       "  2. **Issues**: numbered list, each with: (a) severity label, (b) file:line reference, " +
       "(c) which chiasmus tool/template surfaced it, (d) concrete evidence (model, violating input, " +

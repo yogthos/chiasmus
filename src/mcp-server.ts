@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -234,6 +235,11 @@ ANALYSES:
   path         — call chain from→to (needs from, to)
   impact       — what breaks if target changes? (needs target)
   layer-violation — calls that skip abstraction layers (handlers→db without going through services)
+  communities  — Louvain community detection: inferred module clusters with cohesion scores
+  hubs         — highest-degree nodes (refactor-sensitive centers of the call graph)
+  bridges      — top betweenness centrality — nodes connecting otherwise separate subgraphs
+  surprises    — cross-community + peripheral→hub edges (often latent coupling or design smells)
+  diff         — compare current graph to a saved snapshot (needs against=<snapshot-name>)
   facts        — raw Prolog facts for custom queries via chiasmus_verify`,
     inputSchema: {
       type: "object" as const,
@@ -245,8 +251,22 @@ ANALYSES:
         },
         analysis: {
           type: "string",
-          enum: ["summary", "callers", "callees", "reachability", "dead-code", "cycles", "path", "impact", "layer-violation", "facts"],
+          enum: [
+            "summary", "callers", "callees", "reachability",
+            "dead-code", "cycles", "path", "impact",
+            "layer-violation", "facts",
+            "communities", "hubs", "bridges", "surprises",
+            "diff",
+          ],
           description: "Which analysis to run",
+        },
+        against: {
+          type: "string",
+          description: "Snapshot name to diff against (required when analysis=\"diff\")",
+        },
+        save_snapshot: {
+          type: "string",
+          description: "If set, save the extracted graph under this snapshot name for later diffing. Requires cache=true.",
         },
         target: {
           type: "string",
@@ -264,6 +284,10 @@ ANALYSES:
           type: "array",
           items: { type: "string" },
           description: "Entry point function names for dead-code analysis (auto-detects exports if omitted)",
+        },
+        cache: {
+          type: "boolean",
+          description: "Enable persistent per-file extraction cache (default false). Unchanged files skip re-parsing across calls. Cache dir defaults to ~/.cache/chiasmus (or $CHIASMUS_CACHE_DIR); repoKey derives from cwd.",
         },
       },
       required: ["files", "analysis"],
@@ -382,6 +406,10 @@ Entry points (for dead-code phase) are optional — chiasmus_graph auto-detects 
           type: "array",
           items: { type: "string" },
           description: "Optional entry point function names for dead-code analysis",
+        },
+        delta_against: {
+          type: "string",
+          description: "Name of a previously saved graph snapshot (e.g. 'main'). When set, a phase 0 runs graph_diff to scope the review to symbols this PR adds/removes/rewires. Requires the snapshot was saved earlier via chiasmus_graph save_snapshot=<name>.",
         },
       },
       required: ["files"],
@@ -711,7 +739,20 @@ function handleLint(args: Record<string, unknown>): CallToolResult {
   };
 }
 
-const VALID_ANALYSES = ["summary", "callers", "callees", "reachability", "dead-code", "cycles", "path", "impact", "layer-violation", "facts"];
+const VALID_ANALYSES = [
+  "summary", "callers", "callees", "reachability",
+  "dead-code", "cycles", "path", "impact",
+  "layer-violation", "facts",
+  "communities", "hubs", "bridges", "surprises",
+  "diff",
+];
+
+let cachedRepoKey: string | null = null;
+function defaultRepoKey(): string {
+  if (cachedRepoKey) return cachedRepoKey;
+  cachedRepoKey = createHash("sha256").update(process.cwd()).digest("hex").slice(0, 16);
+  return cachedRepoKey;
+}
 
 async function handleGraph(args: Record<string, unknown>): Promise<CallToolResult> {
   const files = args.files;
@@ -742,12 +783,18 @@ async function handleGraph(args: Record<string, unknown>): Promise<CallToolResul
   }
 
   try {
+    const cacheOpts = args.cache === true ? { repoKey: defaultRepoKey() } : undefined;
     const result = await runAnalysis(files as string[], {
       analysis: analysis as AnalysisType,
       target: args.target as string | undefined,
       from: args.from as string | undefined,
       to: args.to as string | undefined,
       entryPoints: args.entry_points as string[] | undefined,
+      against: args.against as string | undefined,
+      saveSnapshot: args.save_snapshot as string | undefined,
+      // `diff` and `save_snapshot` both require the cache to locate on-disk
+      // state — auto-enable when either is set.
+      cache: cacheOpts ?? ((args.save_snapshot || analysis === "diff") ? { repoKey: defaultRepoKey() } : undefined),
     });
     // Compact JSON: pretty-printing doubled payload size for no benefit and
     // large graph analyses hit MCP stdio transport limits.
@@ -781,12 +828,14 @@ function handleReview(args: Record<string, unknown>): CallToolResult {
 
   const focus = args.focus as ReviewFocus | undefined;
   const entryPoints = args.entry_points as string[] | undefined;
+  const deltaAgainst = args.delta_against as string | undefined;
 
   try {
     const plan = buildReviewPlan({
       files: files as string[],
       focus,
       entry_points: entryPoints,
+      delta_against: deltaAgainst,
     });
     return {
       content: [{ type: "text", text: JSON.stringify(plan, null, 2) }],
