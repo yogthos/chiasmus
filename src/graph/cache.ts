@@ -105,11 +105,19 @@ async function ensureDir(dir: string): Promise<void> {
 
 // Memoize the one-time lockfile bootstrap per repoDir so `withRepoLock`
 // doesn't pay an `open(..., "a")` + `close` on every acquisition.
+// Bounded to prevent unbounded growth in long-running servers that touch
+// many distinct repos — evict the oldest (insertion-order) entry when full.
+const BOOTSTRAP_CAP = 256;
 const bootstrapped = new Map<string, Promise<void>>();
 
 async function ensureLockFile(paths: CachePaths): Promise<void> {
   const pending = bootstrapped.get(paths.repoDir);
-  if (pending) return pending;
+  if (pending) {
+    // Refresh LRU position: delete + re-insert moves to the newest slot.
+    bootstrapped.delete(paths.repoDir);
+    bootstrapped.set(paths.repoDir, pending);
+    return pending;
+  }
   const p = (async () => {
     await ensureDir(paths.repoDir);
     try {
@@ -119,6 +127,10 @@ async function ensureLockFile(paths: CachePaths): Promise<void> {
       // Lock acquisition will surface the real error if this genuinely failed.
     }
   })();
+  if (bootstrapped.size >= BOOTSTRAP_CAP) {
+    const oldest = bootstrapped.keys().next().value;
+    if (oldest !== undefined) bootstrapped.delete(oldest);
+  }
   bootstrapped.set(paths.repoDir, p);
   return p;
 }
@@ -162,6 +174,17 @@ export async function checkFileCache(
   hits: Array<{ path: string; graph: CodeGraph }>;
   misses: Array<{ path: string; content: string }>;
 }> {
+  // Read path is intentionally unlocked — warm hits need to stay cheap.
+  // Safety relies on two invariants:
+  //   1. Every manifest write is `writeFile(.tmp) + rename` (POSIX-atomic;
+  //      Windows ReplaceFile is too). Readers see either the old or new
+  //      manifest, never a torn document.
+  //   2. `readManifest` returns an empty manifest on any parse/read failure,
+  //      which forces every file into the miss path. The subsequent
+  //      `saveFileCache` rewrites the manifest correctly, so any transient
+  //      corruption is self-healing — not a silent correctness failure.
+  // Reading under the write lock would serialize every check behind saves
+  // and roughly double warm-hit latency; the unlocked path stays safe.
   const paths = resolveCachePaths(opts);
   const manifest = await readManifest(paths);
   const now = new Date();

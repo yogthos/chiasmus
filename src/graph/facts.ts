@@ -130,10 +130,15 @@ export function graphToProlog(
   }
   if (graph.contains.length > 0) lines.push("");
 
-  // hyperedge(Id, Relation). + hyperedge_member(Id, Member).
+  // hyperedge(Id, Relation). + hyperedge_member(Id, Member). + hyperedge_label(Id, Label).
   if (graph.hyperedges && graph.hyperedges.length > 0) {
+    const anyLabel = graph.hyperedges.some((h) => h.label !== "");
+    if (anyLabel) lines.push(":- dynamic(hyperedge_label/2).");
     for (const h of graph.hyperedges) {
       lines.push(`hyperedge(${escapeAtom(h.id)}, ${escapeAtom(h.relation)}).`);
+      if (h.label !== "") {
+        lines.push(`hyperedge_label(${escapeAtom(h.id)}, ${escapeAtom(h.label)}).`);
+      }
       for (const m of h.nodes) {
         lines.push(`hyperedge_member(${escapeAtom(h.id)}, ${escapeAtom(m)}).`);
       }

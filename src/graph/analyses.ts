@@ -136,6 +136,26 @@ export async function runAnalysis(
     };
   }
 
+  // Guard: if the caller both saves AND diffs against the same snapshot
+  // name, the save would clobber the baseline before the diff runs,
+  // producing a silent "no changes" result. Reject explicitly.
+  if (
+    request.saveSnapshot &&
+    request.analysis === "diff" &&
+    request.against === request.saveSnapshot
+  ) {
+    return {
+      analysis: request.analysis,
+      result: {
+        error:
+          `saveSnapshot and against cannot name the same snapshot ('${request.saveSnapshot}') — ` +
+          "the save would overwrite the baseline before the diff runs. " +
+          "Use distinct names (e.g. save_snapshot='feature-branch', against='main').",
+      },
+      warnings: warnings.length > 0 ? warnings : undefined,
+    };
+  }
+
   const graph = await extractGraph(files, request.cache ? { cache: request.cache } : {});
 
   if (request.saveSnapshot) {

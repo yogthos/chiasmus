@@ -76,7 +76,6 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
-    "@types/proper-lockfile": "^4.1.4",
     "@yogthos/tree-sitter-clojure": "^0.0.14",
     "better-sqlite3": "^12.8.0",
     "graphology": "^0.26.0",
@@ -96,6 +95,7 @@
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.0.0",
+    "@types/proper-lockfile": "^4.1.4",
     "graphology-types": "^0.24.8",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0",
