@@ -1,26 +1,58 @@
 import { parseSource, parseSourceAsync, getLanguageForFile } from "./parser.js";
 import { getAdapter } from "./adapter-registry.js";
-import type { CodeGraph, DefinesFact, CallsFact, ImportsFact, ExportsFact, ContainsFact } from "./types.js";
+import { checkFileCache, saveFileCache, type CacheOptions } from "./cache.js";
+import type { CodeGraph, DefinesFact, CallsFact, ImportsFact, ExportsFact, ContainsFact, FileNode } from "./types.js";
+
+export interface ExtractOptions {
+  /**
+   * When supplied, read/write per-file extraction results from disk. The
+   * cache is keyed on content+path, so unchanged files skip parsing.
+   */
+  cache?: CacheOptions;
+}
 
 /** Extract a unified call graph from multiple source files */
-export async function extractGraph(files: Array<{ path: string; content: string }>): Promise<CodeGraph> {
-  const partials = await Promise.all(files.map((file) => extractFileGraph(file)));
+export async function extractGraph(
+  files: Array<{ path: string; content: string }>,
+  opts: ExtractOptions = {},
+): Promise<CodeGraph> {
+  let cached: Array<{ path: string; graph: CodeGraph }> = [];
+  let toExtract: Array<{ path: string; content: string }> = files;
+
+  if (opts.cache) {
+    const r = await checkFileCache(files, opts.cache);
+    cached = r.hits;
+    toExtract = r.misses;
+  }
+
+  const fresh = await Promise.all(
+    toExtract.map(async (file) => ({ path: file.path, content: file.content, graph: await extractFileGraph(file) })),
+  );
+
+  if (opts.cache && fresh.length > 0) {
+    await saveFileCache(
+      fresh.map(({ path, content, graph }) => ({ path, content, graph })),
+      opts.cache,
+    );
+  }
 
   const defines: DefinesFact[] = [];
   const calls: CallsFact[] = [];
   const imports: ImportsFact[] = [];
   const exports: ExportsFact[] = [];
   const contains: ContainsFact[] = [];
+  const fileNodes = new Map<string, FileNode>();
 
-  for (const p of partials) {
+  for (const { graph: p } of [...cached, ...fresh]) {
     defines.push(...p.defines);
     calls.push(...p.calls);
     imports.push(...p.imports);
     exports.push(...p.exports);
     contains.push(...p.contains);
+    for (const fn of p.files ?? []) if (!fileNodes.has(fn.path)) fileNodes.set(fn.path, fn);
   }
 
-  return { defines, calls, imports, exports, contains };
+  return { defines, calls, imports, exports, contains, files: [...fileNodes.values()] };
 }
 
 async function extractFileGraph(file: { path: string; content: string }): Promise<CodeGraph> {
@@ -29,14 +61,17 @@ async function extractFileGraph(file: { path: string; content: string }): Promis
   const imports: ImportsFact[] = [];
   const exports: ExportsFact[] = [];
   const contains: ContainsFact[] = [];
+  const files: FileNode[] = [];
   const callSet = new Set<string>();
 
   const lang = getLanguageForFile(file.path);
-  if (!lang) return { defines, calls, imports, exports, contains };
+  if (!lang) return { defines, calls, imports, exports, contains, files };
+
+  files.push({ path: file.path, language: lang });
 
   const tree = parseSource(file.content, file.path)
     ?? await parseSourceAsync(file.content, file.path);
-  if (!tree) return { defines, calls, imports, exports, contains };
+  if (!tree) return { defines, calls, imports, exports, contains, files };
 
   try {
     extractFromTree(tree, file.path, lang, defines, calls, imports, exports, contains, callSet);
@@ -46,7 +81,7 @@ async function extractFileGraph(file: { path: string; content: string }): Promis
     // and are GC'd normally — guard with optional chaining.
     (tree as any).delete?.();
   }
-  return { defines, calls, imports, exports, contains };
+  return { defines, calls, imports, exports, contains, files };
 }
 
 function extractFromTree(

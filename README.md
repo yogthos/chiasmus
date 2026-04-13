@@ -122,9 +122,24 @@ chiasmus_graph files=["main.go", "handler.go"] analysis="impact" target="Query"
 → { analysis: "impact", result: ["Handle", "main"] }
 ```
 
-Analyses: `summary`, `callers`, `callees`, `reachability`, `dead-code`, `cycles`, `path`, `impact`, `layer-violation`, `facts`.
+Analyses: `summary`, `callers`, `callees`, `reachability`, `dead-code`, `cycles`, `path`, `impact`, `layer-violation`, `communities`, `hubs`, `bridges`, `surprises`, `diff`, `entry-points`, `facts`.
 
-Reachability-heavy analyses (`cycles`, `reachability`, `path`, `impact`, `dead-code`, `callers`, `callees`) run on native O(V+E) graph algorithms and scale to codebases with thousands of functions. The `facts` analysis still emits raw Prolog for use with `chiasmus_verify`, capped at 10 MB — above that limit the result is `{ error, size, limit }` rather than a program string, so narrow the file set or call a specific analysis directly.
+Reachability-heavy analyses (`cycles`, `reachability`, `path`, `impact`, `dead-code`, `callers`, `callees`) run on native O(V+E) graph algorithms and scale to codebases with thousands of functions. `communities` uses Louvain; `bridges` uses exact betweenness centrality. The `facts` analysis emits raw Prolog for use with `chiasmus_verify`, capped at 10 MB — above that limit the result is `{ error, size, limit }` rather than a program string, so narrow the file set or call a specific analysis directly. Opt in to `include_insights=true` on `facts` to also emit `community/2`, `cohesion/2`, `hub/2`, `bridge/2` predicates.
+
+### Persistent cache and PR diff
+
+Pass `cache=true` on `chiasmus_graph` to enable a per-file content-hash cache — unchanged files skip re-parsing across calls. On a 42-file TypeScript repo, warm hits run at ~2.5ms vs ~170ms cold (60× speedup). Cache lives under `$CHIASMUS_CACHE_DIR` (default `~/.cache/chiasmus`) with an LRU budget per repo.
+
+```
+chiasmus_graph files=[...] analysis="summary" cache=true save_snapshot="main"
+→ extracts + saves the current graph as the "main" baseline
+
+# After branch changes:
+chiasmus_graph files=[...] analysis="diff" against="main" cache=true
+→ { addedNodes, removedNodes, addedEdges, removedEdges, summary }
+```
+
+`chiasmus_review` accepts `delta_against="<snapshot>"` — when set, a phase 0 diffs against the snapshot, impact-checks removed symbols, and scopes later phases to what the PR actually changed.
 
 **`chiasmus_skills`** — Search the template library. Ships with 8 starter templates covering authorization, configuration, dependency resolution, validation, rule inference, and graph reachability. By-name lookups include related template suggestions.
 
@@ -383,7 +398,7 @@ library.close();
 |---------|---------|
 | `chiasmus` | All public APIs (barrel export) |
 | `chiasmus/solvers` | `SolverSession`, `createZ3Solver`, `createPrologSolver`, `correctionLoop`, solver types |
-| `chiasmus/graph` | `extractGraph`, `runAnalysis`, `runAnalysisFromGraph`, `buildFactsResult`, `DEFAULT_FACTS_MAX_BYTES`, `parseMermaid`, `graphToProlog`, adapter registry, graph types |
+| `chiasmus/graph` | `extractGraph`, `runAnalysis`, `runAnalysisFromGraph`, `buildFactsResult`, `graphToProlog`, `parseMermaid`, `detectCommunities`, `detectHubs`, `detectBridges`, `detectSurprisingConnections`, `detectEntryPoints`, `graphDiff`, `saveSnapshot`/`loadSnapshot`/`listSnapshots`, cache APIs, adapter registry, graph types |
 | `chiasmus/formalize` | `lintSpec`, `classifyFeedback`, `extractPrologQuery`, `FormalizationEngine`, result types |
 | `chiasmus/skills` | `SkillLibrary`, `SkillLearner`, `craftTemplate`, `validateTemplate`, skill types |
 | `chiasmus/llm` | `createLLMFromEnv`, `AnthropicAdapter`, `OpenAICompatibleAdapter`, LLM types |
@@ -394,6 +409,8 @@ library.close();
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `CHIASMUS_HOME` | `~/.chiasmus/` | Database, skill storage, and config |
+| `CHIASMUS_CACHE_DIR` | `~/.cache/chiasmus` | Per-file extraction cache + graph snapshots (when `cache=true`) |
+| `CHIASMUS_CACHE_MAX_PER_REPO` | `67108864` (64 MB) | Per-repo cache byte budget — LRU eviction above this |
 | `ANTHROPIC_API_KEY` | — | Optional: Anthropic provider for autonomous mode |
 | `DEEPSEEK_API_KEY` | — | Optional: DeepSeek provider for autonomous mode |
 | `OPENAI_API_KEY` | — | Optional: OpenAI provider for autonomous mode |

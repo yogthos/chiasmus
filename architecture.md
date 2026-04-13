@@ -155,9 +155,15 @@ New normalization patterns discovered during use get saved back to the template,
 |------|---------|---------------|
 | `chiasmus_solve` | End-to-end: normalize → formalize → verify → return result | Yes |
 | `chiasmus_verify` | Submit raw SMT-LIB or Prolog directly, get solver result | No |
-| `chiasmus_formalize` | Normalize + formalize only, return formal spec for inspection | Yes |
+| `chiasmus_formalize` | Find template + return slot-filling instructions for the calling LLM | No* |
+| `chiasmus_craft` | Create a new template (LLM-designed, validated server-side) | No |
 | `chiasmus_skills` | Search/list templates in the skill library | No |
 | `chiasmus_learn` | Extract a new candidate skill from a verified solution | Yes |
+| `chiasmus_lint` | Fast structural validation without running the solver | No |
+| `chiasmus_graph` | Source-code call-graph analysis (16 analyses incl. communities, hubs, bridges, diff, entry-points) | No |
+| `chiasmus_review` | Phased code-review recipe with optional PR-delta scope | No |
+
+*`chiasmus_formalize` selects the template server-side; the calling LLM fills slots.
 
 ## Solver Engines
 

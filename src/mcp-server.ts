@@ -21,6 +21,7 @@ import type { LLMAdapter } from "./llm/types.js";
 import type { SolverResult } from "./solvers/types.js";
 import { runAnalysis } from "./graph/analyses.js";
 import type { AnalysisType } from "./graph/analyses.js";
+import { defaultRepoKey } from "./graph/cache.js";
 import { craftTemplate } from "./skills/craft.js";
 import { parseMermaid } from "./graph/mermaid.js";
 import type { CraftInput } from "./skills/craft.js";
@@ -30,6 +31,14 @@ import type { ReviewFocus } from "./review.js";
 export function getChiasmusHome(): string {
   return process.env.CHIASMUS_HOME ?? join(homedir(), ".chiasmus");
 }
+
+const GRAPH_ANALYSES = [
+  "summary", "callers", "callees", "reachability",
+  "dead-code", "cycles", "path", "impact",
+  "layer-violation", "facts",
+  "communities", "hubs", "bridges", "surprises",
+  "diff", "entry-points",
+] as const;
 
 const TOOLS = [
   {
@@ -219,22 +228,26 @@ Returns cleaned spec + fixes applied + remaining errors.`,
   },
   {
     name: "chiasmus_graph",
-    description: `Analyze source code call graphs via tree-sitter + Prolog.
-
-Parse source files → extract call graph → run formal analysis.
-Supports: TypeScript, JavaScript, Python, Go, Clojure. Files must be absolute paths.
+    description: `Analyze source-code call graphs (tree-sitter + Prolog). Absolute paths only.
+Languages: TypeScript, JavaScript, Python, Go, Clojure.
 
 ANALYSES:
-  summary      — overview: files, functions, call edges
-  callers      — who calls target? (needs target)
-  callees      — what does target call? (needs target)
-  reachability — can from reach to? (needs from, to)
-  dead-code    — functions unreachable from entry points (methods excluded — dynamic dispatch)
-  cycles       — circular call dependencies
-  path         — call chain from→to (needs from, to)
-  impact       — what breaks if target changes? (needs target)
-  layer-violation — calls that skip abstraction layers (handlers→db without going through services)
-  facts        — raw Prolog facts for custom queries via chiasmus_verify`,
+  summary         overview counts
+  callers         who calls target (needs target)
+  callees         what target calls (needs target)
+  reachability    can from reach to (needs from, to)
+  path            shortest chain from→to (needs from, to)
+  impact          transitive callers of target (needs target)
+  dead-code       unreachable functions (methods excluded)
+  cycles          circular call dependencies
+  layer-violation calls that skip layers (handlers→db bypassing services)
+  communities     Louvain clusters with cohesion scores
+  hubs            top-degree nodes
+  bridges         top betweenness — connect otherwise-separate subgraphs
+  surprises       cross-community + peripheral→hub edges
+  diff            current graph vs saved snapshot (needs against)
+  entry-points    zero-in-degree exports — seed dead-code
+  facts           raw Prolog for chiasmus_verify`,
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -245,8 +258,20 @@ ANALYSES:
         },
         analysis: {
           type: "string",
-          enum: ["summary", "callers", "callees", "reachability", "dead-code", "cycles", "path", "impact", "layer-violation", "facts"],
+          enum: GRAPH_ANALYSES,
           description: "Which analysis to run",
+        },
+        against: {
+          type: "string",
+          description: "Snapshot name to diff against (required when analysis=\"diff\")",
+        },
+        save_snapshot: {
+          type: "string",
+          description: "If set, save the extracted graph under this snapshot name for later diffing. Requires cache=true.",
+        },
+        include_insights: {
+          type: "boolean",
+          description: "For analysis=\"facts\" only: also emit community/2, cohesion/2, hub/2, bridge/2 facts. Default false to keep facts dumps lean.",
         },
         target: {
           type: "string",
@@ -264,6 +289,10 @@ ANALYSES:
           type: "array",
           items: { type: "string" },
           description: "Entry point function names for dead-code analysis (auto-detects exports if omitted)",
+        },
+        cache: {
+          type: "boolean",
+          description: "Enable persistent per-file extraction cache (default false). Unchanged files skip re-parsing across calls. Cache dir defaults to ~/.cache/chiasmus (or $CHIASMUS_CACHE_DIR); repoKey derives from cwd.",
         },
       },
       required: ["files", "analysis"],
@@ -347,24 +376,16 @@ Optional: set test=true with an example to run it through the solver.`,
   },
   {
     name: "chiasmus_review",
-    description: `Return a phased code-review recipe — which chiasmus tools and templates to run, in what order, and what to look for.
-
-Output is a structured plan (no side effects, no solver calls). Execute phases in order:
-each action names a tool + args + 'interpret' guidance. Skip phases not applicable to the codebase.
+    description: `Phased code-review recipe — which tools to run, in what order, what to flag. Pure plan, no side effects. Execute phases sequentially; each action carries 'interpret' guidance. End with a numbered issue list per the reporting section.
 
 FOCUS:
-  all           — full review (structural → architecture → security → resource → auth → correctness → impact)
-  quick         — structural overview + architecture health only
-  architecture  — dead code, cycles, layer violations, impact
-  security      — taint flow, resource pairing, auth contradictions
-  correctness   — invariants, boundaries, state machines, impact
+  all           structural → architecture → security → resource → auth → correctness → impact
+  quick         overview + architecture only
+  architecture  dead code, cycles, layer violations, impact
+  security      taint, resource pairing, auth contradictions
+  correctness   invariants, boundaries, state machines, impact
 
-WORKFLOW:
-  1. Call chiasmus_review with files + focus → get the plan
-  2. Execute each phase's actions in order using the named tools
-  3. After all phases, produce a numbered issue list with severity per the reporting section
-
-Entry points (for dead-code phase) are optional — chiasmus_graph auto-detects exports if omitted.`,
+Set delta_against=<snapshot> for PR-scoped review: a phase 0 diffs vs the snapshot and scopes later phases to changed symbols.`,
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -382,6 +403,10 @@ Entry points (for dead-code phase) are optional — chiasmus_graph auto-detects 
           type: "array",
           items: { type: "string" },
           description: "Optional entry point function names for dead-code analysis",
+        },
+        delta_against: {
+          type: "string",
+          description: "Name of a previously saved graph snapshot (e.g. 'main'). When set, a phase 0 runs graph_diff to scope the review to symbols this PR adds/removes/rewires. Requires the snapshot was saved earlier via chiasmus_graph save_snapshot=<name>.",
         },
       },
       required: ["files"],
@@ -711,7 +736,6 @@ function handleLint(args: Record<string, unknown>): CallToolResult {
   };
 }
 
-const VALID_ANALYSES = ["summary", "callers", "callees", "reachability", "dead-code", "cycles", "path", "impact", "layer-violation", "facts"];
 
 async function handleGraph(args: Record<string, unknown>): Promise<CallToolResult> {
   const files = args.files;
@@ -733,21 +757,28 @@ async function handleGraph(args: Record<string, unknown>): Promise<CallToolResul
     };
   }
 
-  if (!VALID_ANALYSES.includes(analysis)) {
+  if (!(GRAPH_ANALYSES as readonly string[]).includes(analysis)) {
     return {
       content: [{ type: "text", text: JSON.stringify({
-        error: `Unknown analysis: ${analysis}. Use one of: ${VALID_ANALYSES.join(", ")}`,
+        error: `Unknown analysis: ${analysis}. Use one of: ${GRAPH_ANALYSES.join(", ")}`,
       }) }],
     };
   }
 
   try {
+    const cacheOpts = args.cache === true ? { repoKey: defaultRepoKey() } : undefined;
     const result = await runAnalysis(files as string[], {
       analysis: analysis as AnalysisType,
       target: args.target as string | undefined,
       from: args.from as string | undefined,
       to: args.to as string | undefined,
       entryPoints: args.entry_points as string[] | undefined,
+      against: args.against as string | undefined,
+      saveSnapshot: args.save_snapshot as string | undefined,
+      includeInsights: args.include_insights as boolean | undefined,
+      // `diff` and `save_snapshot` both require the cache to locate on-disk
+      // state — auto-enable when either is set.
+      cache: cacheOpts ?? ((args.save_snapshot || analysis === "diff") ? { repoKey: defaultRepoKey() } : undefined),
     });
     // Compact JSON: pretty-printing doubled payload size for no benefit and
     // large graph analyses hit MCP stdio transport limits.
@@ -781,12 +812,14 @@ function handleReview(args: Record<string, unknown>): CallToolResult {
 
   const focus = args.focus as ReviewFocus | undefined;
   const entryPoints = args.entry_points as string[] | undefined;
+  const deltaAgainst = args.delta_against as string | undefined;
 
   try {
     const plan = buildReviewPlan({
       files: files as string[],
       focus,
       entry_points: entryPoints,
+      delta_against: deltaAgainst,
     });
     return {
       content: [{ type: "text", text: JSON.stringify(plan, null, 2) }],

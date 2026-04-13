@@ -1,6 +1,11 @@
 import { readFileSync, statSync } from "node:fs";
 import { extractGraph } from "./extractor.js";
 import { graphToProlog } from "./facts.js";
+import { loadSnapshot, saveSnapshot, type CacheOptions } from "./cache.js";
+import { detectCommunities } from "./community.js";
+import { detectHubs, detectBridges, detectSurprisingConnections } from "./insights.js";
+import { graphDiff } from "./diff.js";
+import { detectEntryPoints } from "./entry-points.js";
 import {
   cycles as nativeCycles,
   reachability as nativeReachability,
@@ -40,8 +45,9 @@ export function buildFactsResult(
   graph: CodeGraph,
   entryPoints: string[] | undefined,
   maxBytes: number = DEFAULT_FACTS_MAX_BYTES,
+  prologOpts?: { includeInsights?: boolean },
 ): string | FactsOversizeError {
-  const program = graphToProlog(graph, entryPoints);
+  const program = graphToProlog(graph, entryPoints, prologOpts);
   if (program.length > maxBytes) {
     return {
       error:
@@ -58,7 +64,9 @@ export function buildFactsResult(
 export type AnalysisType =
   | "summary" | "callers" | "callees" | "reachability"
   | "dead-code" | "cycles" | "path" | "impact" | "facts"
-  | "layer-violation";
+  | "layer-violation"
+  | "communities" | "hubs" | "bridges" | "surprises"
+  | "diff" | "entry-points";
 
 export interface AnalysisRequest {
   analysis: AnalysisType;
@@ -66,6 +74,26 @@ export interface AnalysisRequest {
   from?: string;
   to?: string;
   entryPoints?: string[];
+  /** Snapshot name to diff against (required when analysis="diff"). */
+  against?: string;
+  /**
+   * When set, the extracted graph is saved under this snapshot name after
+   * analysis completes. Useful for capturing a baseline ("main") that a
+   * later `diff` call can compare against.
+   */
+  saveSnapshot?: string;
+  /**
+   * For analysis="facts" only: also emit community/2, cohesion/2, hub/2,
+   * bridge/2 facts alongside the base fact set. Off by default since these
+   * add O(V+E) work and bloat the fact dump.
+   */
+  includeInsights?: boolean;
+  /**
+   * Enable persistent per-file extraction cache. Supply an object (with
+   * optional cacheDir/repoKey/budget overrides) to opt in. Omit or pass
+   * undefined to extract fresh every call.
+   */
+  cache?: CacheOptions;
 }
 
 export interface AnalysisResult {
@@ -108,7 +136,24 @@ export async function runAnalysis(
     };
   }
 
-  const graph = await extractGraph(files);
+  const graph = await extractGraph(files, request.cache ? { cache: request.cache } : {});
+
+  if (request.saveSnapshot) {
+    if (!request.cache) {
+      warnings.push(
+        "saveSnapshot ignored: cache option is required to persist snapshots",
+      );
+    } else {
+      try {
+        await saveSnapshot(request.saveSnapshot, graph, request.cache);
+      } catch (e: unknown) {
+        warnings.push(
+          `Failed to save snapshot ${request.saveSnapshot}: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+    }
+  }
+
   const base = await runOnGraph(graph, request);
   return warnings.length > 0 ? { ...base, warnings } : base;
 }
@@ -135,7 +180,12 @@ async function runOnGraph(
 ): Promise<AnalysisResult> {
   switch (request.analysis) {
     case "facts":
-      return { analysis: "facts", result: buildFactsResult(graph, request.entryPoints) };
+      return {
+        analysis: "facts",
+        result: buildFactsResult(graph, request.entryPoints, DEFAULT_FACTS_MAX_BYTES, {
+          includeInsights: request.includeInsights ?? false,
+        }),
+      };
 
     case "summary":
       return { analysis: "summary", result: buildSummary(graph) };
@@ -171,6 +221,35 @@ async function runOnGraph(
     case "impact":
       if (!request.target) return missingParams("impact");
       return { analysis: "impact", result: nativeImpact(graph, request.target) };
+
+    case "communities":
+      return { analysis: "communities", result: detectCommunities(graph) };
+
+    case "hubs":
+      return { analysis: "hubs", result: detectHubs(graph) };
+
+    case "bridges":
+      return { analysis: "bridges", result: detectBridges(graph) };
+
+    case "surprises":
+      return { analysis: "surprises", result: detectSurprisingConnections(graph) };
+
+    case "entry-points":
+      return { analysis: "entry-points", result: detectEntryPoints(graph) };
+
+    case "diff": {
+      if (!request.against) {
+        return { analysis: "diff", result: { error: "Missing required parameter 'against' — specify a snapshot name to diff against" } };
+      }
+      if (!request.cache) {
+        return { analysis: "diff", result: { error: "diff requires a cache option so snapshots can be located on disk" } };
+      }
+      const baseline = await loadSnapshot(request.against, request.cache);
+      if (!baseline) {
+        return { analysis: "diff", result: { error: `Snapshot '${request.against}' not found. Save one first via saveSnapshot.` } };
+      }
+      return { analysis: "diff", result: graphDiff(baseline, graph) };
+    }
 
     default:
       return { analysis: request.analysis, result: { error: `Unknown analysis: ${request.analysis}` } };
@@ -241,7 +320,7 @@ function buildSummary(graph: CodeGraph) {
   const files = new Set(graph.defines.map((d) => d.file));
   const functions = graph.defines.filter((d) => d.kind === "function" || d.kind === "method").length;
   const classes = graph.defines.filter((d) => d.kind === "class").length;
-  return {
+  const summary: Record<string, number> = {
     files: files.size,
     functions,
     classes,
@@ -249,5 +328,9 @@ function buildSummary(graph: CodeGraph) {
     imports: graph.imports.length,
     exports: graph.exports.length,
   };
+  if (graph.hyperedges && graph.hyperedges.length > 0) {
+    summary.hyperedges = graph.hyperedges.length;
+  }
+  return summary;
 }
 
