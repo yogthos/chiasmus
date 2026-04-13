@@ -1,21 +1,17 @@
 /**
- * On-disk cache for extracted per-file CodeGraph fragments.
+ * On-disk cache for per-file CodeGraph extraction results.
  *
  * Layout:
  *   <cacheDir>/<repoKey>/
- *     .lock                 proper-lockfile target (empty file)
+ *     .lock                 proper-lockfile target
  *     manifest.json         { schemaVersion, entries: {absPath: {hash, size, savedAt}} }
  *     files/<hash>.json     one serialized CodeGraph fragment per cached file
+ *     snapshots/<name>.json full serialized graph at a point in time
  *
- * - Writes are atomic via `.tmp` + `rename`.
- * - All manifest read-modify-write sequences are serialized by proper-lockfile
- *   on `.lock`. Readers (checkFileCache) tolerate a racing eviction by treating
- *   a missing file as a miss.
- * - LRU is tracked via file mtime: `utimes` bumps the cache entry on every
- *   hit. Eviction sorts oldest-first and removes until the per-repo byte
- *   budget is satisfied.
- * - Schema version mismatch invalidates every entry (returns an empty manifest
- *   from readManifest).
+ * All manifest read-modify-write sequences serialize through `withRepoLock`.
+ * Readers tolerate a racing eviction by treating a missing file as a miss.
+ * LRU is tracked via file mtime: `utimes` bumps the entry on every hit, and
+ * eviction sorts oldest-first.
  */
 
 import { createHash } from "node:crypto";
@@ -30,11 +26,13 @@ export const CACHE_SCHEMA_VERSION = "1";
 const DEFAULT_MAX_BYTES_PER_REPO = 64 * 1024 * 1024; // 64 MB
 
 export interface CacheOptions {
-  /** Root cache directory. Defaults to ~/.cache/chiasmus or $CHIASMUS_CACHE_DIR. */
+  /** Root cache directory. Defaults to $CHIASMUS_CACHE_DIR or ~/.cache/chiasmus. */
   cacheDir?: string;
   /** Identifier for a specific repository/project. Defaults to "default". */
   repoKey?: string;
-  /** Per-repo byte budget. Defaults to 64 MB or $CHIASMUS_CACHE_MAX_PER_REPO. */
+  /**
+   * Per-repo byte budget. Defaults to $CHIASMUS_CACHE_MAX_PER_REPO or 64 MB.
+   */
   maxBytesPerRepo?: number;
 }
 
@@ -62,6 +60,20 @@ function defaultCacheDir(): string {
   return join(homedir(), ".cache", "chiasmus");
 }
 
+function defaultMaxBytesPerRepo(): number {
+  const env = process.env.CHIASMUS_CACHE_MAX_PER_REPO;
+  if (env) {
+    const n = Number.parseInt(env, 10);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return DEFAULT_MAX_BYTES_PER_REPO;
+}
+
+/** Deterministic repoKey derived from a working directory — safe across sessions. */
+export function defaultRepoKey(cwd: string = process.cwd()): string {
+  return createHash("sha256").update(cwd).digest("hex").slice(0, 16);
+}
+
 export function resolveCachePaths(opts: CacheOptions = {}): CachePaths {
   const cacheDir = opts.cacheDir ?? defaultCacheDir();
   const repoKey = opts.repoKey ?? "default";
@@ -76,9 +88,8 @@ export function resolveCachePaths(opts: CacheOptions = {}): CachePaths {
 }
 
 /**
- * Per-file content hash. SHA256 of content || 0x00 || absPath. Matches
- * graphify `cache.py:20-33` — the path suffix prevents two distinct files
- * with identical content from colliding.
+ * Per-file content hash. The path suffix prevents two distinct files with
+ * identical content from colliding.
  */
 export function fileHash(content: string, absPath: string): string {
   const h = createHash("sha256");
@@ -92,14 +103,24 @@ async function ensureDir(dir: string): Promise<void> {
   await fs.mkdir(dir, { recursive: true });
 }
 
+// Memoize the one-time lockfile bootstrap per repoDir so `withRepoLock`
+// doesn't pay an `open(..., "a")` + `close` on every acquisition.
+const bootstrapped = new Map<string, Promise<void>>();
+
 async function ensureLockFile(paths: CachePaths): Promise<void> {
-  await ensureDir(paths.repoDir);
-  try {
-    const fd = await fs.open(paths.lockPath, "a");
-    await fd.close();
-  } catch {
-    // Non-fatal — lock acquisition will surface the real error.
-  }
+  const pending = bootstrapped.get(paths.repoDir);
+  if (pending) return pending;
+  const p = (async () => {
+    await ensureDir(paths.repoDir);
+    try {
+      const fd = await fs.open(paths.lockPath, "a");
+      await fd.close();
+    } catch {
+      // Lock acquisition will surface the real error if this genuinely failed.
+    }
+  })();
+  bootstrapped.set(paths.repoDir, p);
+  return p;
 }
 
 async function readManifest(paths: CachePaths): Promise<Manifest> {
@@ -107,8 +128,6 @@ async function readManifest(paths: CachePaths): Promise<Manifest> {
     const raw = await fs.readFile(paths.manifestPath, "utf-8");
     const parsed = JSON.parse(raw) as Manifest;
     if (parsed.schemaVersion !== CACHE_SCHEMA_VERSION) {
-      // Schema drift invalidates every entry — return an empty manifest so
-      // the next save writes the current schema version.
       return { schemaVersion: CACHE_SCHEMA_VERSION, entries: {} };
     }
     return parsed;
@@ -145,33 +164,34 @@ export async function checkFileCache(
 }> {
   const paths = resolveCachePaths(opts);
   const manifest = await readManifest(paths);
-
-  const hits: Array<{ path: string; graph: CodeGraph }> = [];
-  const misses: Array<{ path: string; content: string }> = [];
   const now = new Date();
 
-  for (const f of files) {
-    const h = fileHash(f.content, f.path);
-    const entry = manifest.entries[f.path];
-    if (entry && entry.hash === h) {
+  const results = await Promise.all(
+    files.map(async (f) => {
+      const h = fileHash(f.content, f.path);
+      const entry = manifest.entries[f.path];
+      if (!entry || entry.hash !== h) {
+        return { hit: false as const, path: f.path, content: f.content };
+      }
       const cachePath = join(paths.filesDir, `${h}.json`);
       try {
         const raw = await fs.readFile(cachePath, "utf-8");
         const graph = JSON.parse(raw) as CodeGraph;
-        // Bump mtime for LRU ordering. Best-effort — a concurrent eviction
-        // racing us is acceptable since the next read will miss and repopulate.
-        try {
-          await fs.utimes(cachePath, now, now);
-        } catch {}
-        hits.push({ path: f.path, graph });
-        continue;
+        // Best-effort mtime bump for LRU ordering.
+        fs.utimes(cachePath, now, now).catch(() => {});
+        return { hit: true as const, path: f.path, graph };
       } catch {
-        // File missing or corrupt — fall through to miss.
+        return { hit: false as const, path: f.path, content: f.content };
       }
-    }
-    misses.push({ path: f.path, content: f.content });
-  }
+    }),
+  );
 
+  const hits: Array<{ path: string; graph: CodeGraph }> = [];
+  const misses: Array<{ path: string; content: string }> = [];
+  for (const r of results) {
+    if (r.hit) hits.push({ path: r.path, graph: r.graph });
+    else misses.push({ path: r.path, content: r.content });
+  }
   return { hits, misses };
 }
 
@@ -182,88 +202,109 @@ export async function saveFileCache(
   if (items.length === 0) return;
   const paths = resolveCachePaths(opts);
   await ensureDir(paths.filesDir);
+  const budget = opts.maxBytesPerRepo ?? defaultMaxBytesPerRepo();
 
   await withRepoLock(paths, async () => {
     const manifest = await readManifest(paths);
     const now = Date.now();
 
-    for (const item of items) {
+    // Prepare serializations synchronously so the hot path's awaits are all I/O.
+    const prepared = items.map((item) => {
       const h = fileHash(item.content, item.path);
-      const cachePath = join(paths.filesDir, `${h}.json`);
-      const tmp = cachePath + ".tmp";
       const serialized = JSON.stringify(item.graph);
-      await fs.writeFile(tmp, serialized);
-      await fs.rename(tmp, cachePath);
-      manifest.entries[item.path] = {
+      return {
+        path: item.path,
         hash: h,
+        serialized,
         size: Buffer.byteLength(serialized, "utf-8"),
-        savedAt: now,
+        cachePath: join(paths.filesDir, `${h}.json`),
       };
+    });
+
+    // Parallel atomic writes — dominated the cold-populate latency when
+    // sequential (41 files × ~4 ms write+rename = ~165 ms observed).
+    await Promise.all(prepared.map(async (p) => {
+      const tmp = p.cachePath + ".tmp";
+      await fs.writeFile(tmp, p.serialized);
+      await fs.rename(tmp, p.cachePath);
+    }));
+
+    for (const p of prepared) {
+      manifest.entries[p.path] = { hash: p.hash, size: p.size, savedAt: now };
     }
 
     await writeManifest(paths, manifest);
+    await evictIfOverBudget(paths, manifest, budget);
   });
-
-  await evictLRU(opts);
 }
 
 /**
- * Enforce the per-repo byte budget. Scans files/ directly (not the manifest)
- * so orphaned entries left by a crash also count toward the budget. Sorts by
- * mtime ascending — graphify has no equivalent; this is our addition.
- *
- * When evictions happen, the manifest is rewritten to drop the removed
- * entries so subsequent reads don't claim hits for now-missing files.
+ * Fast-path eviction inside the current lock, using the manifest's tracked
+ * sizes to decide whether the disk scan is needed at all. The full O(N)
+ * directory walk only runs when the manifest total is over budget.
+ */
+async function evictIfOverBudget(
+  paths: CachePaths,
+  manifest: Manifest,
+  budget: number,
+): Promise<void> {
+  let manifestTotal = 0;
+  for (const e of Object.values(manifest.entries)) manifestTotal += e.size;
+  if (manifestTotal <= budget) return;
+
+  // Over budget — scan disk to include any orphans left by a prior crash.
+  let names: string[];
+  try {
+    names = await fs.readdir(paths.filesDir);
+  } catch {
+    return;
+  }
+  const entries: Array<{ name: string; size: number; mtime: number; path: string }> = [];
+  for (const n of names) {
+    if (!n.endsWith(".json")) continue;
+    const p = join(paths.filesDir, n);
+    try {
+      const s = await fs.stat(p);
+      entries.push({ name: n, size: s.size, mtime: s.mtimeMs, path: p });
+    } catch {}
+  }
+
+  let total = entries.reduce((a, e) => a + e.size, 0);
+  if (total <= budget) return;
+
+  entries.sort((a, b) => a.mtime - b.mtime);
+  const hashToFilePath = new Map<string, string>();
+  for (const [filePath, e] of Object.entries(manifest.entries)) {
+    hashToFilePath.set(e.hash, filePath);
+  }
+
+  let changed = false;
+  for (const e of entries) {
+    if (total <= budget) break;
+    try {
+      await fs.unlink(e.path);
+      total -= e.size;
+      const hash = e.name.replace(/\.json$/, "");
+      const filePath = hashToFilePath.get(hash);
+      if (filePath) delete manifest.entries[filePath];
+      changed = true;
+    } catch {}
+  }
+
+  if (changed) await writeManifest(paths, manifest);
+}
+
+/**
+ * Public eviction entry point. Prefer the in-save fast path; use this only
+ * when invoking eviction independently of a save (e.g. to reclaim space
+ * after a budget change).
  */
 export async function evictLRU(opts: CacheOptions = {}): Promise<void> {
   const paths = resolveCachePaths(opts);
-  const budget = opts.maxBytesPerRepo ?? DEFAULT_MAX_BYTES_PER_REPO;
-
+  const budget = opts.maxBytesPerRepo ?? defaultMaxBytesPerRepo();
   await withRepoLock(paths, async () => {
-    let names: string[];
-    try {
-      names = await fs.readdir(paths.filesDir);
-    } catch {
-      return; // No files dir yet.
-    }
-
-    const entries: Array<{ name: string; size: number; mtime: number; path: string }> = [];
-    for (const n of names) {
-      if (!n.endsWith(".json")) continue; // Skip .tmp and anything else.
-      const p = join(paths.filesDir, n);
-      try {
-        const s = await fs.stat(p);
-        entries.push({ name: n, size: s.size, mtime: s.mtimeMs, path: p });
-      } catch {
-        // File vanished between readdir and stat — ignore.
-      }
-    }
-
-    let total = entries.reduce((a, e) => a + e.size, 0);
-    if (total <= budget) return;
-
-    entries.sort((a, b) => a.mtime - b.mtime); // oldest first
-
     const manifest = await readManifest(paths);
-    const hashToFilePath = new Map<string, string>();
-    for (const [filePath, e] of Object.entries(manifest.entries)) {
-      hashToFilePath.set(e.hash, filePath);
-    }
-
-    for (const e of entries) {
-      if (total <= budget) break;
-      try {
-        await fs.unlink(e.path);
-        total -= e.size;
-        const hash = e.name.replace(/\.json$/, "");
-        const filePath = hashToFilePath.get(hash);
-        if (filePath) delete manifest.entries[filePath];
-      } catch {
-        // Concurrent removal — skip.
-      }
-    }
-
-    await writeManifest(paths, manifest);
+    await evictIfOverBudget(paths, manifest, budget);
   });
 }
 
@@ -271,34 +312,21 @@ export async function clearRepoCache(opts: CacheOptions = {}): Promise<void> {
   const paths = resolveCachePaths(opts);
   try {
     await fs.rm(paths.repoDir, { recursive: true, force: true });
-  } catch {
-    // Already gone — nothing to do.
-  }
+  } catch {}
+  bootstrapped.delete(paths.repoDir);
 }
 
 // ── Snapshots ────────────────────────────────────────────────────────────
-//
-// A snapshot is a full serialized CodeGraph saved under a user-chosen name
-// (usually a branch name or git SHA). Separate from the per-file cache —
-// used by chiasmus_graph's `diff` analysis and chiasmus_review's PR-delta
-// phase to compare two points in time.
 
 function snapshotsDir(paths: CachePaths): string {
   return join(paths.repoDir, "snapshots");
 }
 
-function validateSnapshotName(name: string): void {
-  if (!name || name.length === 0) {
-    throw new Error("Snapshot name cannot be empty");
-  }
-  // Reject anything that could escape the snapshots directory.
+function snapshotPath(paths: CachePaths, name: string): string {
+  if (!name) throw new Error("Snapshot name cannot be empty");
   if (name.includes("/") || name.includes("\\") || name.includes("..") || name.includes("\0")) {
     throw new Error(`Invalid snapshot name: ${name}`);
   }
-}
-
-function snapshotPath(paths: CachePaths, name: string): string {
-  validateSnapshotName(name);
   return join(snapshotsDir(paths), `${name}.json`);
 }
 
@@ -307,11 +335,9 @@ export async function saveSnapshot(
   graph: CodeGraph,
   opts: CacheOptions = {},
 ): Promise<void> {
-  validateSnapshotName(name);
   const paths = resolveCachePaths(opts);
-  const dir = snapshotsDir(paths);
-  await ensureDir(dir);
   const target = snapshotPath(paths, name);
+  await ensureDir(snapshotsDir(paths));
   const tmp = target + ".tmp";
   await fs.writeFile(tmp, JSON.stringify(graph));
   await fs.rename(tmp, target);
@@ -321,7 +347,6 @@ export async function loadSnapshot(
   name: string,
   opts: CacheOptions = {},
 ): Promise<CodeGraph | null> {
-  validateSnapshotName(name);
   const paths = resolveCachePaths(opts);
   try {
     const raw = await fs.readFile(snapshotPath(paths, name), "utf-8");
@@ -345,11 +370,8 @@ export async function deleteSnapshot(
   name: string,
   opts: CacheOptions = {},
 ): Promise<void> {
-  validateSnapshotName(name);
   const paths = resolveCachePaths(opts);
   try {
     await fs.unlink(snapshotPath(paths, name));
-  } catch {
-    // Already gone — nothing to do.
-  }
+  } catch {}
 }

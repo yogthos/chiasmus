@@ -1,15 +1,3 @@
-/**
- * Graph diff — compare two CodeGraph snapshots and report what changed.
- *
- * Port of graphify `analyze.py:456-537` (`graph_diff`). Preserves graphify's
- * semantics:
- *   - Node diff is a pure set diff on node IDs (nothing is tracked about
- *     attribute changes — a symbol moving between files with the same name
- *     produces no diff).
- *   - Edge key is (source, target). Edges with changed metadata but the
- *     same endpoints produce no diff.
- */
-
 import type { CodeGraph } from "./types.js";
 
 export interface GraphDiffEdge {
@@ -46,6 +34,11 @@ function pluralize(n: number, singular: string): string {
   return `${n} ${singular}${n === 1 ? "" : "s"}`;
 }
 
+/**
+ * Diff two graphs. Node identity is the name; edge identity is the
+ * (source, target) tuple. Changes to edge metadata with the same endpoints
+ * produce no diff — intentional, keeps the output actionable.
+ */
 export function graphDiff(before: CodeGraph, after: CodeGraph): GraphDiffResult {
   const beforeNodes = collectNodes(before);
   const afterNodes = collectNodes(after);
@@ -78,10 +71,10 @@ export function graphDiff(before: CodeGraph, after: CodeGraph): GraphDiffResult 
   removedEdges.sort((a, b) => a.source.localeCompare(b.source) || a.target.localeCompare(b.target));
 
   const parts: string[] = [];
-  if (addedNodes.length) parts.push(`${pluralize(addedNodes.length, "new node")}`);
-  if (addedEdges.length) parts.push(`${pluralize(addedEdges.length, "new edge")}`);
-  if (removedNodes.length) parts.push(`${removedNodes.length} node${removedNodes.length === 1 ? "" : "s"} removed`);
-  if (removedEdges.length) parts.push(`${removedEdges.length} edge${removedEdges.length === 1 ? "" : "s"} removed`);
+  if (addedNodes.length) parts.push(pluralize(addedNodes.length, "new node"));
+  if (addedEdges.length) parts.push(pluralize(addedEdges.length, "new edge"));
+  if (removedNodes.length) parts.push(`${pluralize(removedNodes.length, "node")} removed`);
+  if (removedEdges.length) parts.push(`${pluralize(removedEdges.length, "edge")} removed`);
   const summary = parts.length === 0 ? "no changes" : parts.join(", ");
 
   return { addedNodes, removedNodes, addedEdges, removedEdges, summary };

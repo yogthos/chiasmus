@@ -44,8 +44,9 @@ export function buildFactsResult(
   graph: CodeGraph,
   entryPoints: string[] | undefined,
   maxBytes: number = DEFAULT_FACTS_MAX_BYTES,
+  prologOpts?: { includeInsights?: boolean },
 ): string | FactsOversizeError {
-  const program = graphToProlog(graph, entryPoints);
+  const program = graphToProlog(graph, entryPoints, prologOpts);
   if (program.length > maxBytes) {
     return {
       error:
@@ -80,6 +81,12 @@ export interface AnalysisRequest {
    * later `diff` call can compare against.
    */
   saveSnapshot?: string;
+  /**
+   * For analysis="facts" only: also emit community/2, cohesion/2, hub/2,
+   * bridge/2 facts alongside the base fact set. Off by default since these
+   * add O(V+E) work and bloat the fact dump.
+   */
+  includeInsights?: boolean;
   /**
    * Enable persistent per-file extraction cache. Supply an object (with
    * optional cacheDir/repoKey/budget overrides) to opt in. Omit or pass
@@ -172,7 +179,12 @@ async function runOnGraph(
 ): Promise<AnalysisResult> {
   switch (request.analysis) {
     case "facts":
-      return { analysis: "facts", result: buildFactsResult(graph, request.entryPoints) };
+      return {
+        analysis: "facts",
+        result: buildFactsResult(graph, request.entryPoints, DEFAULT_FACTS_MAX_BYTES, {
+          includeInsights: request.includeInsights ?? false,
+        }),
+      };
 
     case "summary":
       return { analysis: "summary", result: buildSummary(graph) };

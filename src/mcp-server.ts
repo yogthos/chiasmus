@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 
-import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -22,6 +21,7 @@ import type { LLMAdapter } from "./llm/types.js";
 import type { SolverResult } from "./solvers/types.js";
 import { runAnalysis } from "./graph/analyses.js";
 import type { AnalysisType } from "./graph/analyses.js";
+import { defaultRepoKey } from "./graph/cache.js";
 import { craftTemplate } from "./skills/craft.js";
 import { parseMermaid } from "./graph/mermaid.js";
 import type { CraftInput } from "./skills/craft.js";
@@ -31,6 +31,14 @@ import type { ReviewFocus } from "./review.js";
 export function getChiasmusHome(): string {
   return process.env.CHIASMUS_HOME ?? join(homedir(), ".chiasmus");
 }
+
+const GRAPH_ANALYSES = [
+  "summary", "callers", "callees", "reachability",
+  "dead-code", "cycles", "path", "impact",
+  "layer-violation", "facts",
+  "communities", "hubs", "bridges", "surprises",
+  "diff",
+] as const;
 
 const TOOLS = [
   {
@@ -251,13 +259,7 @@ ANALYSES:
         },
         analysis: {
           type: "string",
-          enum: [
-            "summary", "callers", "callees", "reachability",
-            "dead-code", "cycles", "path", "impact",
-            "layer-violation", "facts",
-            "communities", "hubs", "bridges", "surprises",
-            "diff",
-          ],
+          enum: GRAPH_ANALYSES,
           description: "Which analysis to run",
         },
         against: {
@@ -267,6 +269,10 @@ ANALYSES:
         save_snapshot: {
           type: "string",
           description: "If set, save the extracted graph under this snapshot name for later diffing. Requires cache=true.",
+        },
+        include_insights: {
+          type: "boolean",
+          description: "For analysis=\"facts\" only: also emit community/2, cohesion/2, hub/2, bridge/2 facts. Default false to keep facts dumps lean.",
         },
         target: {
           type: "string",
@@ -739,20 +745,6 @@ function handleLint(args: Record<string, unknown>): CallToolResult {
   };
 }
 
-const VALID_ANALYSES = [
-  "summary", "callers", "callees", "reachability",
-  "dead-code", "cycles", "path", "impact",
-  "layer-violation", "facts",
-  "communities", "hubs", "bridges", "surprises",
-  "diff",
-];
-
-let cachedRepoKey: string | null = null;
-function defaultRepoKey(): string {
-  if (cachedRepoKey) return cachedRepoKey;
-  cachedRepoKey = createHash("sha256").update(process.cwd()).digest("hex").slice(0, 16);
-  return cachedRepoKey;
-}
 
 async function handleGraph(args: Record<string, unknown>): Promise<CallToolResult> {
   const files = args.files;
@@ -774,10 +766,10 @@ async function handleGraph(args: Record<string, unknown>): Promise<CallToolResul
     };
   }
 
-  if (!VALID_ANALYSES.includes(analysis)) {
+  if (!(GRAPH_ANALYSES as readonly string[]).includes(analysis)) {
     return {
       content: [{ type: "text", text: JSON.stringify({
-        error: `Unknown analysis: ${analysis}. Use one of: ${VALID_ANALYSES.join(", ")}`,
+        error: `Unknown analysis: ${analysis}. Use one of: ${GRAPH_ANALYSES.join(", ")}`,
       }) }],
     };
   }
@@ -792,6 +784,7 @@ async function handleGraph(args: Record<string, unknown>): Promise<CallToolResul
       entryPoints: args.entry_points as string[] | undefined,
       against: args.against as string | undefined,
       saveSnapshot: args.save_snapshot as string | undefined,
+      includeInsights: args.include_insights as boolean | undefined,
       // `diff` and `save_snapshot` both require the cache to locate on-disk
       // state — auto-enable when either is set.
       cache: cacheOpts ?? ((args.save_snapshot || analysis === "diff") ? { repoKey: defaultRepoKey() } : undefined),

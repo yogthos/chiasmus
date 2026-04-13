@@ -1,24 +1,7 @@
-/**
- * Community detection via Louvain on the call graph.
- *
- * Port of graphify's `graphify/cluster.py` behavior, using
- * graphology-communities-louvain. Deterministic via a seeded RNG
- * (seed=42 matches graphify cluster.py:48).
- *
- * Key behaviors preserved from graphify:
- * - Directed graph is converted to undirected for clustering (cluster.py:71-72)
- * - Isolated nodes get one-node communities each (cluster.py:87-91)
- * - Communities larger than max(10, 0.25 * total_nodes) get a second
- *   Louvain pass on the subgraph (cluster.py:55-56, 94-122)
- * - Final communities are size-sorted descending and reindexed 0..N
- *   (cluster.py:102-104)
- * - Members within each community are lexically sorted for determinism
- * - Cohesion = actual_intra_edges / max_possible_edges (cluster.py:125-133)
- */
-
 import { UndirectedGraph } from "graphology";
 import louvainModule from "graphology-communities-louvain";
 import type { CodeGraph } from "./types.js";
+import { collectNodes, buildUndirectedGraph, forEachUndirectedEdge } from "./graph-util.js";
 
 // NodeNext/CJS interop: graphology-communities-louvain is `module.exports = fn`
 // but NodeNext surfaces the import as the namespace object. Cast to callable.
@@ -49,8 +32,8 @@ function makeRng(seed: number): () => number {
 
 /**
  * Cohesion score: ratio of actual intra-community edges to the maximum
- * possible (n choose 2). Returns 0 for communities of size 0 or 1 where the
- * denominator is undefined.
+ * possible (n choose 2). Returns 0 when the denominator is undefined
+ * (singleton or empty community).
  */
 export function cohesionScore(memberCount: number, intraEdges: number): number {
   if (memberCount < 2) return 0;
@@ -68,27 +51,11 @@ export function detectCommunities(
   opts: DetectOptions = {},
 ): Community[] {
   const seed = opts.seed ?? DEFAULT_SEED;
-
-  // Collect every node that participates in the graph.
-  const nodes = new Set<string>();
-  for (const d of graph.defines) nodes.add(d.name);
-  for (const c of graph.calls) {
-    nodes.add(c.caller);
-    nodes.add(c.callee);
-  }
-
+  const nodes = collectNodes(graph);
   if (nodes.size === 0) return [];
 
-  const gg = new UndirectedGraph();
-  for (const n of nodes) gg.addNode(n);
-  for (const c of graph.calls) {
-    if (c.caller === c.callee) continue;
-    if (!gg.hasEdge(c.caller, c.callee)) {
-      gg.addEdge(c.caller, c.callee);
-    }
-  }
+  const gg = buildUndirectedGraph(graph, nodes);
 
-  // Run Louvain only if there are edges; otherwise everyone is a singleton.
   let assignments: Record<string, number>;
   if (gg.size === 0) {
     assignments = {};
@@ -96,7 +63,7 @@ export function detectCommunities(
     for (const n of nodes) assignments[n] = i++;
   } else {
     assignments = louvain(gg, { rng: makeRng(seed) });
-    // Isolated nodes missing from the Louvain output get their own community.
+    // Louvain skips nodes with no edges — assign each isolate its own community.
     let nextId = 0;
     for (const cid of Object.values(assignments)) if (cid >= nextId) nextId = cid + 1;
     for (const n of nodes) {
@@ -104,25 +71,19 @@ export function detectCommunities(
     }
   }
 
-  // Split oversized communities: graphify cluster.py:55-56, 94-122.
+  // Recursively split any community larger than max(10, 0.25·n). Without
+  // this, Louvain leaves mega-communities that swamp the rest of the output.
   const splitThreshold = Math.max(10, Math.floor(0.25 * nodes.size));
   let next = Math.max(-1, ...Object.values(assignments)) + 1;
   const byCommunity = groupBy(assignments);
   for (const [cidStr, members] of Object.entries(byCommunity)) {
     if (members.length <= splitThreshold) continue;
-    // Build subgraph induced by these members.
-    const sub = new UndirectedGraph();
-    for (const m of members) sub.addNode(m);
-    for (const c of graph.calls) {
-      if (c.caller === c.callee) continue;
-      if (!sub.hasNode(c.caller) || !sub.hasNode(c.callee)) continue;
-      if (!sub.hasEdge(c.caller, c.callee)) sub.addEdge(c.caller, c.callee);
-    }
+    const memberSet = new Set(members);
+    const sub = buildUndirectedGraph(graph, memberSet);
     if (sub.size === 0) continue;
     const subAssign = louvain(sub, { rng: makeRng(seed + Number(cidStr) + 1) });
     const distinctSubIds = new Set(Object.values(subAssign));
-    if (distinctSubIds.size <= 1) continue; // No split achieved.
-    // Re-map: keep one subgroup under the original cid, move the rest to new ids.
+    if (distinctSubIds.size <= 1) continue;
     const subIds = [...distinctSubIds];
     const remap = new Map<number, number>();
     remap.set(subIds[0], Number(cidStr));
@@ -132,7 +93,7 @@ export function detectCommunities(
     }
   }
 
-  // Reindex communities by descending size, lexical tiebreak on first member.
+  // Reindex by descending size, lexical tiebreak on first member.
   const grouped = groupBy(assignments);
   const orderedCommunities = Object.entries(grouped)
     .map(([_, members]) => [...members].sort())
@@ -141,24 +102,16 @@ export function detectCommunities(
       return a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0;
     });
 
-  // Count intra-edges per community for cohesion.
   const memberToCommunity = new Map<string, number>();
   orderedCommunities.forEach((members, id) => {
     for (const m of members) memberToCommunity.set(m, id);
   });
   const intraCounts = new Array(orderedCommunities.length).fill(0);
-  const seen = new Set<string>();
-  for (const c of graph.calls) {
-    if (c.caller === c.callee) continue;
-    const cid = memberToCommunity.get(c.caller);
-    const did = memberToCommunity.get(c.callee);
-    if (cid === undefined || did === undefined) continue;
-    if (cid !== did) continue;
-    const key = c.caller < c.callee ? `${c.caller}|${c.callee}` : `${c.callee}|${c.caller}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    intraCounts[cid]++;
-  }
+  forEachUndirectedEdge(graph, (a, b) => {
+    const cid = memberToCommunity.get(a);
+    const did = memberToCommunity.get(b);
+    if (cid !== undefined && cid === did) intraCounts[cid]++;
+  });
 
   return orderedCommunities.map((members, id) => ({
     id,

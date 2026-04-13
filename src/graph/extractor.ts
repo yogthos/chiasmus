@@ -36,30 +36,23 @@ export async function extractGraph(
     );
   }
 
-  const fragments = [
-    ...cached.map(({ graph }) => graph),
-    ...fresh.map(({ graph }) => graph),
-  ];
-
   const defines: DefinesFact[] = [];
   const calls: CallsFact[] = [];
   const imports: ImportsFact[] = [];
   const exports: ExportsFact[] = [];
   const contains: ContainsFact[] = [];
-  const fileSet = new Map<string, FileNode>();
+  const fileNodes = new Map<string, FileNode>();
 
-  for (const p of fragments) {
+  for (const { graph: p } of [...cached, ...fresh]) {
     defines.push(...p.defines);
     calls.push(...p.calls);
     imports.push(...p.imports);
     exports.push(...p.exports);
     contains.push(...p.contains);
-    for (const fn of p.files ?? []) {
-      if (!fileSet.has(fn.path)) fileSet.set(fn.path, fn);
-    }
+    for (const fn of p.files ?? []) if (!fileNodes.has(fn.path)) fileNodes.set(fn.path, fn);
   }
 
-  return { defines, calls, imports, exports, contains, files: [...fileSet.values()] };
+  return { defines, calls, imports, exports, contains, files: [...fileNodes.values()] };
 }
 
 async function extractFileGraph(file: { path: string; content: string }): Promise<CodeGraph> {

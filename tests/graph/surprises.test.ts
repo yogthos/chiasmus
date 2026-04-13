@@ -41,7 +41,7 @@ describe("detectSurprisingConnections", () => {
     const xcom = surprises.find(
       (s) => [s.source, s.target].sort().join("|") === ["a", "d"].sort().join("|"),
     );
-    expect(xcom?.reason).toMatch(/cross-community/);
+    expect(xcom?.reasons).toContain("cross-community");
   });
 
   it("peripheral→hub edges earn a +1 bonus", () => {
@@ -55,7 +55,7 @@ describe("detectSurprisingConnections", () => {
       (s) => [s.source, s.target].sort().join("|") === ["hub", "leaf"].sort().join("|"),
     );
     expect(leafHub).toBeDefined();
-    expect(leafHub?.reason).toMatch(/peripheral/);
+    expect(leafHub?.reasons).toContain("peripheral-to-hub");
   });
 
   it("respects topN option", () => {
