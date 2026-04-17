@@ -17,7 +17,7 @@ import {
 } from "./native-analyses.js";
 import type { CodeGraph } from "./types.js";
 
-const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+export const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 
 /**
  * Maximum byte size of a `facts` analysis response. Above this the Prolog

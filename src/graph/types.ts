@@ -5,6 +5,13 @@ export interface DefinesFact {
   name: string;
   kind: SymbolKind;
   line: number;
+  /**
+   * Raw signature text for callable/type defines, as it appears in source
+   * (params list and, when cheap to capture, return type / arglist vector).
+   * Populated for function/method/class defines per language adapter; left
+   * undefined for variable defines or when the adapter can't resolve it.
+   */
+  signature?: string;
 }
 
 export interface CallsFact {
@@ -31,6 +38,17 @@ export interface ContainsFact {
 export interface FileNode {
   path: string;
   language: string;
+  /**
+   * Leading file-level doc: first JSDoc/docstring/comment block at the top
+   * of the file, normalized to a single trimmed paragraph. Used by the map
+   * projection to give an LLM a 1-line description without reading the
+   * file. Undefined when the file has no leading comment or docstring.
+   */
+  fileDoc?: string;
+  /** Approximate token count (content length / 3.5, rounded up). */
+  tokenEstimate?: number;
+  /** Total line count of the file at extraction time. */
+  lineCount?: number;
 }
 
 /**

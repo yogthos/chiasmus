@@ -21,7 +21,10 @@ import { join } from "node:path";
 import lockfile from "proper-lockfile";
 import type { CodeGraph } from "./types.js";
 
-export const CACHE_SCHEMA_VERSION = "1";
+// "2" introduced FileNode.fileDoc/tokenEstimate/lineCount and
+// DefinesFact.signature; "1" caches lack these fields and would render as
+// partial maps until naturally invalidated by content change.
+export const CACHE_SCHEMA_VERSION = "2";
 
 const DEFAULT_MAX_BYTES_PER_REPO = 64 * 1024 * 1024; // 64 MB
 

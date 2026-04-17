@@ -67,13 +67,21 @@ async function extractFileGraph(file: { path: string; content: string }): Promis
   const lang = getLanguageForFile(file.path);
   if (!lang) return { defines, calls, imports, exports, contains, files };
 
-  files.push({ path: file.path, language: lang });
+  const fileNode: FileNode = {
+    path: file.path,
+    language: lang,
+    tokenEstimate: Math.ceil(file.content.length / 3.5),
+    lineCount: countLines(file.content),
+  };
+  files.push(fileNode);
 
   const tree = parseSource(file.content, file.path)
     ?? await parseSourceAsync(file.content, file.path);
   if (!tree) return { defines, calls, imports, exports, contains, files };
 
   try {
+    const doc = extractFileDoc(tree.rootNode, lang);
+    if (doc) fileNode.fileDoc = doc;
     extractFromTree(tree, file.path, lang, defines, calls, imports, exports, contains, callSet);
   } finally {
     // web-tree-sitter (WASM) trees must be explicitly freed or WASM memory
@@ -82,6 +90,143 @@ async function extractFileGraph(file: { path: string; content: string }): Promis
     (tree as any).delete?.();
   }
   return { defines, calls, imports, exports, contains, files };
+}
+
+/**
+ * Count newline-terminated lines, plus a trailing line if the file doesn't
+ * end with `\n`. Empty file counts as 0.
+ */
+function countLines(content: string): number {
+  if (content.length === 0) return 0;
+  let n = 0;
+  for (let i = 0; i < content.length; i++) {
+    if (content.charCodeAt(i) === 10) n++;
+  }
+  if (content.charCodeAt(content.length - 1) !== 10) n++;
+  return n;
+}
+
+/**
+ * Leading file-level documentation. The goal is to hand an LLM something
+ * that actually describes the file — not license headers, shebangs, or
+ * emacs modelines. Each language picks only the *idiomatic* doc shape:
+ *
+ *   TS / JS  — first `/** ... *\/` JSDoc block. Single-line `//` comments
+ *              are almost always SPDX/license/shebang noise and are
+ *              rejected even when they look like prose.
+ *   Python   — module-level `"""..."""` docstring. `#` comments are
+ *              rejected (too often shebangs or coding declarations).
+ *   Go       — any leading `//` comment block, per the Go package-doc
+ *              convention (`// Package foo does X.`).
+ *   Clojure  — no leading `;` comments captured; the idiomatic spot is
+ *              the ns docstring, which we don't parse yet.
+ *
+ * Result is collapsed to a single paragraph and truncated to DOC_MAX_LEN.
+ */
+const DOC_MAX_LEN = 240;
+
+function extractFileDoc(root: any, lang: string): string | undefined {
+  if (lang === "python") {
+    return extractPythonModuleDocstring(root);
+  }
+  if (lang === "clojure") {
+    return undefined;
+  }
+
+  const lines: string[] = [];
+  let sawDocShape = false;
+  for (let i = 0; i < root.childCount; i++) {
+    const child = root.child(i);
+    if (!child) break;
+    if (!isCommentNode(child.type)) break;
+    if (!isDocShape(child.text, lang)) {
+      // Stop at the first non-doc comment: license/SPDX headers usually
+      // sit before any real doc, so continuing the walk would re-capture
+      // the noise we rejected here.
+      break;
+    }
+    sawDocShape = true;
+    const text = normalizeCommentText(child.text);
+    if (text) lines.push(text);
+  }
+  if (!sawDocShape) return undefined;
+  const joined = lines.join(" ").replace(/\s+/g, " ").trim();
+  if (joined.length === 0) return undefined;
+  return joined.length > DOC_MAX_LEN ? joined.slice(0, DOC_MAX_LEN - 1) + "…" : joined;
+}
+
+function isCommentNode(type: string): boolean {
+  return type === "comment" || type === "line_comment" || type === "block_comment";
+}
+
+/**
+ * Is this comment text in the language's idiomatic "doc" shape? Per-file
+ * doc extraction only keeps comments that pass this check.
+ */
+function isDocShape(raw: string, lang: string): boolean {
+  const s = raw.trimStart();
+  if (lang === "go") return s.startsWith("//");
+  // TS / JS: require a JSDoc block. Plain `/* ... */` and `//` are noise.
+  return s.startsWith("/**");
+}
+
+function normalizeCommentText(raw: string): string {
+  let s = raw.trim();
+  if (s.startsWith("/**")) s = s.slice(3);
+  else if (s.startsWith("/*")) s = s.slice(2);
+  if (s.endsWith("*/")) s = s.slice(0, -2);
+  const parts = s
+    .split("\n")
+    .map((l) => l.replace(/^\s*(?:\/+|#+|\*+)\s?/, "").trim())
+    .filter(Boolean);
+  return parts.join(" ");
+}
+
+function extractPythonModuleDocstring(root: any): string | undefined {
+  if (root.type !== "module") return undefined;
+  for (let i = 0; i < root.childCount; i++) {
+    const child = root.child(i);
+    if (!child) continue;
+    if (child.type === "comment") continue;
+    if (child.type === "expression_statement") {
+      for (let j = 0; j < child.childCount; j++) {
+        const inner = child.child(j);
+        if (inner.type === "string") {
+          const text = stripPythonStringQuotes(inner.text);
+          const firstParagraph = text.trim().split(/\n\s*\n/)[0].replace(/\s+/g, " ").trim();
+          if (!firstParagraph) return undefined;
+          return firstParagraph.length > DOC_MAX_LEN
+            ? firstParagraph.slice(0, DOC_MAX_LEN - 1) + "…"
+            : firstParagraph;
+        }
+      }
+      return undefined;
+    }
+    return undefined;
+  }
+  return undefined;
+}
+
+function stripPythonStringQuotes(text: string): string {
+  for (const triple of ['"""', "'''"]) {
+    if (text.startsWith(triple) && text.endsWith(triple) && text.length >= triple.length * 2) {
+      return text.slice(triple.length, -triple.length);
+    }
+  }
+  for (const single of ['"', "'"]) {
+    if (text.startsWith(single) && text.endsWith(single) && text.length >= 2) {
+      return text.slice(1, -1);
+    }
+  }
+  return text;
+}
+
+/**
+ * Collapse whitespace in a raw signature snippet so multi-line parameter
+ * lists don't blow up the serialized DefinesFact. Exported for adapter use.
+ */
+function collapseSignature(s: string): string {
+  return s.replace(/\s+/g, " ").trim();
 }
 
 function extractFromTree(
@@ -177,7 +322,11 @@ function walkNode(
     case "function_declaration": {
       const name = node.childForFieldName("name")?.text;
       if (name) {
-        defines.push({ file: filePath, name, kind: "function", line: node.startPosition.row + 1 });
+        defines.push({
+          file: filePath, name, kind: "function",
+          line: node.startPosition.row + 1,
+          signature: extractJsLikeSignature(node),
+        });
         scopeStack.push(name);
         walkChildren(node, filePath, language, scopeStack, aliasMap, pendingRefs, defines, calls, imports, exports, contains, callSet);
         scopeStack.pop();
@@ -189,7 +338,11 @@ function walkNode(
     case "method_definition": {
       const name = node.childForFieldName("name")?.text;
       if (name) {
-        defines.push({ file: filePath, name, kind: "method", line: node.startPosition.row + 1 });
+        defines.push({
+          file: filePath, name, kind: "method",
+          line: node.startPosition.row + 1,
+          signature: extractJsLikeSignature(node),
+        });
         // Find enclosing class for contains relationship
         const className = findEnclosingClassName(node);
         if (className) {
@@ -225,7 +378,11 @@ function walkNode(
           const valueNode = child.childForFieldName("value");
           if (nameNode && valueNode && valueNode.type === "arrow_function") {
             const name = nameNode.text;
-            defines.push({ file: filePath, name, kind: "function", line: node.startPosition.row + 1 });
+            defines.push({
+              file: filePath, name, kind: "function",
+              line: node.startPosition.row + 1,
+              signature: extractJsLikeSignature(valueNode),
+            });
             scopeStack.push(name);
             walkChildren(valueNode, filePath, language, scopeStack, aliasMap, pendingRefs, defines, calls, imports, exports, contains, callSet);
             scopeStack.pop();
@@ -291,6 +448,21 @@ function walkNode(
       for (let i = 0; i < node.childCount; i++) {
         const child = node.child(i);
         if (child.type === "function_declaration" || child.type === "class_declaration") {
+          const name = child.childForFieldName("name")?.text;
+          if (name) {
+            exports.push({ file: filePath, name });
+          }
+        }
+        // TypeScript type-only exports: `export interface Foo {}`,
+        // `export type T = ...`, `export enum E {}`. These don't produce
+        // a DefinesFact (no callable body) but the outward API of the
+        // module still includes them — the map layer uses exports to
+        // count/list a file's public surface, so we must capture the name.
+        if (
+          child.type === "interface_declaration" ||
+          child.type === "type_alias_declaration" ||
+          child.type === "enum_declaration"
+        ) {
           const name = child.childForFieldName("name")?.text;
           if (name) {
             exports.push({ file: filePath, name });
@@ -501,7 +673,11 @@ function walkPython(
       if (name) {
         const enclosingClass = findPythonEnclosingClass(node);
         const kind = enclosingClass ? "method" : "function";
-        defines.push({ file: filePath, name, kind, line: node.startPosition.row + 1 });
+        defines.push({
+          file: filePath, name, kind,
+          line: node.startPosition.row + 1,
+          signature: extractPythonSignature(node),
+        });
         if (enclosingClass) {
           contains.push({ parent: enclosingClass, child: name });
         }
@@ -665,7 +841,11 @@ function walkGo(
       case "function_declaration": {
         const name = node.childForFieldName("name")?.text;
         if (name) {
-          defines.push({ file: filePath, name, kind: "function", line: node.startPosition.row + 1 });
+          defines.push({
+            file: filePath, name, kind: "function",
+            line: node.startPosition.row + 1,
+            signature: extractGoSignature(node),
+          });
           if (/^[A-Z]/.test(name)) {
             exports.push({ file: filePath, name });
           }
@@ -677,7 +857,11 @@ function walkGo(
       case "method_declaration": {
         const name = node.childForFieldName("name")?.text;
         if (name) {
-          defines.push({ file: filePath, name, kind: "method", line: node.startPosition.row + 1 });
+          defines.push({
+            file: filePath, name, kind: "method",
+            line: node.startPosition.row + 1,
+            signature: extractGoSignature(node),
+          });
           // Extract receiver type for contains relationship
           const receiver = node.childForFieldName("receiver");
           const receiverType = extractGoReceiverType(receiver);
@@ -1122,7 +1306,10 @@ function walkClojure(
       case "defn-": {
         const name = cljNextSymNameAfter(child, head.symIdx);
         if (!name) break;
-        defines.push({ file: filePath, name, kind: "function", line });
+        defines.push({
+          file: filePath, name, kind: "function", line,
+          signature: extractCljDefnArglist(child, head.symIdx),
+        });
         if (head.name === "defn") exports.push({ file: filePath, name });
         break;
       }
@@ -1151,6 +1338,7 @@ function walkClojure(
             defines.push({
               file: filePath, name: methodName, kind: "function",
               line: sub.startPosition.row + 1,
+              signature: extractCljProtocolMethodSignature(sub),
             });
             exports.push({ file: filePath, name: methodName });
           }
@@ -1514,4 +1702,95 @@ function cljExtractCalls(
       cljExtractCalls(child, enclosingFn, ctx, calls, callSet);
     }
   }
+}
+
+// ── Signature extraction ─────────────────────────────────────────────
+
+/**
+ * Extract a flattened parameter list + return type (when present) for a
+ * JS/TS function_declaration, method_definition, or arrow_function node.
+ * Returns undefined when the node has no `parameters` field — the callers
+ * only invoke this on shapes that must have one, so undefined is a bug
+ * signal, not a normal result.
+ */
+function extractJsLikeSignature(node: any): string | undefined {
+  const params = node.childForFieldName("parameters");
+  if (!params) return undefined;
+  let sig = params.text;
+  const ret = node.childForFieldName("return_type");
+  if (ret) sig += " " + ret.text;
+  return collapseSignature(sig);
+}
+
+/**
+ * Extract signature from a Python function_definition: parameters plus
+ * return type annotation when present (`-> T` in source).
+ */
+function extractPythonSignature(node: any): string | undefined {
+  const params = node.childForFieldName("parameters");
+  if (!params) return undefined;
+  let sig = params.text;
+  const ret = node.childForFieldName("return_type");
+  if (ret) sig += " -> " + ret.text;
+  return collapseSignature(sig);
+}
+
+/**
+ * Extract signature from a Go function_declaration or method_declaration:
+ * parameters plus result type (tree-sitter-go's `result` field). Excludes
+ * the receiver — that relationship is already captured in `contains`.
+ */
+function extractGoSignature(node: any): string | undefined {
+  const params = node.childForFieldName("parameters");
+  if (!params) return undefined;
+  let sig = params.text;
+  const result = node.childForFieldName("result");
+  if (result) sig += " " + result.text;
+  return collapseSignature(sig);
+}
+
+/**
+ * Extract the arglist vector from a Clojure protocol/interface method
+ * signature `(method-name [args] ?docstring)`. The method form is already
+ * validated by cljMethodImplName before this is called, so the first
+ * `vec_lit` child is guaranteed to be the arglist.
+ */
+function extractCljProtocolMethodSignature(listNode: any): string | undefined {
+  for (let i = 0; i < listNode.childCount; i++) {
+    const child = listNode.child(i);
+    if (child && child.type === "vec_lit") {
+      return collapseSignature(child.text);
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Extract the first arglist vector from a Clojure defn/defn- list_lit.
+ * Handles both single-arity `(defn f [x] ...)` and single-arity with
+ * leading docstring `(defn f "doc" [x] ...)`. Multi-arity defns with a
+ * list of ([args] body) pairs are caught by returning the first `vec_lit`
+ * found inside a nested list_lit.
+ */
+function extractCljDefnArglist(listNode: any, nameSymIdx: number): string | undefined {
+  // Scan forward from just past the name; the arglist is either a direct
+  // vec_lit child (single-arity) or a vec_lit inside a nested list_lit
+  // (multi-arity). Docstrings, attr maps, and metadata are skipped over.
+  for (let i = nameSymIdx + 1; i < listNode.childCount; i++) {
+    const child = listNode.child(i);
+    if (!child) continue;
+    if (child.type === "vec_lit") {
+      return collapseSignature(child.text);
+    }
+    if (child.type === "list_lit") {
+      // Multi-arity: walk until we find the nested vec_lit
+      for (let j = 0; j < child.childCount; j++) {
+        const inner = child.child(j);
+        if (inner && inner.type === "vec_lit") {
+          return collapseSignature(inner.text);
+        }
+      }
+    }
+  }
+  return undefined;
 }
