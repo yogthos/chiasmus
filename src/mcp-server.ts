@@ -420,7 +420,7 @@ Set delta_against=<snapshot> for PR-scoped review: a phase 0 diffs vs the snapsh
     name: "chiasmus_map",
     description: `Pre-built codebase map — read before bulk file reads.
 
-Returns a compact outline derived from the tree-sitter call graph: per-file headlines with exports, signatures, token estimates, leading doc comments. Lets you answer "what is in this repo" / "what does this file expose" / "where is X defined" without opening source.
+Returns a compact outline derived from the tree-sitter call graph: per-file headlines with exports, signatures, token estimates, leading doc. Lets you answer "what is in this repo" / "what does this file expose" / "where is X defined" without opening source.
 
 MODES:
   overview  repo-wide outline: dir tree + per-file headlines + top exports with signatures
@@ -428,6 +428,8 @@ MODES:
   symbol    symbol lookup (needs 'name'): defining files + callers + callees
 
 FORMAT: markdown (default) | json
+
+fileDoc sources per language: TS/JS JSDoc /** */ only; Python """...""" module docstring; Go // package-doc comments; Clojure none (yet). License/SPDX headers, shebangs, and plain // line comments are rejected as non-doc.
 
 Absolute paths only. Languages: TypeScript, JavaScript, Python, Go, Clojure.
 Set cache=true to reuse the per-file extraction cache across calls.`,
@@ -464,7 +466,7 @@ Set cache=true to reuse the per-file extraction cache across calls.`,
         },
         max_exports: {
           type: "number",
-          description: "Max exports surfaced per file in overview mode (default 8)",
+          description: "Max exports surfaced per file in overview mode (default 8; clamped to ≥0)",
         },
         cache: {
           type: "boolean",

@@ -231,17 +231,23 @@ Returns a compact projection of the tree-sitter graph. Implemented in `src/graph
 
 | Mode | Required args | Output |
 |---|---|---|
-| `overview` *(default)* | `files` | Dir-grouped outline: per-file headlines with language, line count, token estimate, leading doc comment, exports with signatures |
+| `overview` *(default)* | `files` | Dir-grouped outline: per-file headlines with language, line count, token estimate, leading doc, exports with signatures |
 | `file` | `files`, `path` | Single-file detail: exports, imports grouped by source, all top-level symbols |
 | `symbol` | `files`, `name` | Where `name` is defined (file + line + signature) plus direct callers and callees |
 
 Options:
 - `format`: `"markdown"` *(default)* or `"json"`. Markdown is optimised for LLM consumption; JSON for programmatic use.
 - `include`: array of glob patterns to filter overview (`**`, `*`, `?` supported). E.g. `["**/src/**"]`.
-- `max_exports`: cap on exports-per-file surfaced in overview (default 8).
+- `max_exports`: cap on exports-per-file surfaced in overview (default 8; negative values clamp to 0).
 - `cache=true`: reuse the shared per-file extraction cache (same directory and invalidation as `chiasmus_graph`).
 
-Data sources (added to `CodeGraph` for this feature): `FileNode.fileDoc` (leading comment block / Python docstring), `FileNode.tokenEstimate` (`ceil(length/3.5)`), `FileNode.lineCount`, and `DefinesFact.signature` (params + return type, or Clojure arglist).
+Data sources (added to `CodeGraph` for this feature):
+- `FileNode.fileDoc` — language-specific, idiomatic doc only: TS/JS JSDoc `/** */`, Python `"""..."""` module docstring, Go `//` package-doc comments. Plain `//` line comments in TS/JS, `#` comments in Python, and `;` comments in Clojure are intentionally rejected (usually license/shebang noise).
+- `FileNode.tokenEstimate` — `ceil(content.length / 3.5)` so an agent can read-budget.
+- `FileNode.lineCount` — newline-count with trailing-line adjustment.
+- `DefinesFact.signature` — params + return type (TS/JS/Python/Go); arglist vector for Clojure `defn` and `defprotocol`/`definterface` methods.
+- TypeScript exports now also include `interface`, `type`, and `enum` declarations, so `exportCount` reflects the full public surface.
+- Cache schema bumped to `"2"` for this change — pre-existing caches auto-invalidate on upgrade.
 
 ## Gotchas
 
