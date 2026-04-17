@@ -19,9 +19,13 @@ import { lintSpec } from "./formalize/validate.js";
 import { createLLMFromEnv } from "./llm/anthropic.js";
 import type { LLMAdapter } from "./llm/types.js";
 import type { SolverResult } from "./solvers/types.js";
-import { runAnalysis } from "./graph/analyses.js";
+import { runAnalysis, MAX_FILE_SIZE } from "./graph/analyses.js";
 import type { AnalysisType } from "./graph/analyses.js";
 import { defaultRepoKey } from "./graph/cache.js";
+import { extractGraph } from "./graph/extractor.js";
+import { buildOverview, buildFileDetail, buildSymbolDetail, renderMap } from "./graph/map.js";
+import type { MapFormat } from "./graph/map.js";
+import { readFileSync, statSync } from "node:fs";
 import { craftTemplate } from "./skills/craft.js";
 import { parseMermaid } from "./graph/mermaid.js";
 import type { CraftInput } from "./skills/craft.js";
@@ -407,6 +411,66 @@ Set delta_against=<snapshot> for PR-scoped review: a phase 0 diffs vs the snapsh
         delta_against: {
           type: "string",
           description: "Name of a previously saved graph snapshot (e.g. 'main'). When set, a phase 0 runs graph_diff to scope the review to symbols this PR adds/removes/rewires. Requires the snapshot was saved earlier via chiasmus_graph save_snapshot=<name>.",
+        },
+      },
+      required: ["files"],
+    },
+  },
+  {
+    name: "chiasmus_map",
+    description: `Pre-built codebase map — read before bulk file reads.
+
+Returns a compact outline derived from the tree-sitter call graph: per-file headlines with exports, signatures, token estimates, leading doc. Lets you answer "what is in this repo" / "what does this file expose" / "where is X defined" without opening source.
+
+MODES:
+  overview  repo-wide outline: dir tree + per-file headlines + top exports with signatures
+  file      single-file detail (needs 'path'): exports, imports, all top-level symbols
+  symbol    symbol lookup (needs 'name'): defining files + callers + callees
+
+FORMAT: markdown (default) | json
+
+fileDoc sources per language: TS/JS JSDoc /** */ only; Python """...""" module docstring; Go // package-doc comments; Clojure none (yet). License/SPDX headers, shebangs, and plain // line comments are rejected as non-doc.
+
+Absolute paths only. Languages: TypeScript, JavaScript, Python, Go, Clojure.
+Set cache=true to reuse the per-file extraction cache across calls.`,
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        files: {
+          type: "array",
+          items: { type: "string" },
+          description: "Absolute file paths to include in the map",
+        },
+        mode: {
+          type: "string",
+          enum: ["overview", "file", "symbol"],
+          description: "Which projection to return (default 'overview')",
+        },
+        path: {
+          type: "string",
+          description: "Absolute file path (required when mode='file')",
+        },
+        name: {
+          type: "string",
+          description: "Symbol name (required when mode='symbol')",
+        },
+        format: {
+          type: "string",
+          enum: ["markdown", "json"],
+          description: "Output format (default 'markdown')",
+        },
+        include: {
+          type: "array",
+          items: { type: "string" },
+          description: "Glob patterns to filter files in overview mode (e.g. ['**/src/**'])",
+        },
+        max_exports: {
+          type: "number",
+          description: "Max exports surfaced per file in overview mode (default 8; clamped to ≥0)",
+        },
+        cache: {
+          type: "boolean",
+          description: "Reuse persistent per-file extraction cache (default false)",
         },
       },
       required: ["files"],
@@ -832,6 +896,134 @@ function handleReview(args: Record<string, unknown>): CallToolResult {
   }
 }
 
+async function handleMap(args: Record<string, unknown>): Promise<CallToolResult> {
+  const files = args.files;
+  if (!Array.isArray(files) || files.length === 0) {
+    return {
+      content: [{ type: "text", text: JSON.stringify({
+        error: "'files' (non-empty string[]) is required",
+      }) }],
+    };
+  }
+  if (files.some((f) => typeof f !== "string")) {
+    return {
+      content: [{ type: "text", text: JSON.stringify({
+        error: "'files' must contain only strings",
+      }) }],
+    };
+  }
+
+  const mode = (args.mode as string | undefined) ?? "overview";
+  if (mode !== "overview" && mode !== "file" && mode !== "symbol") {
+    return {
+      content: [{ type: "text", text: JSON.stringify({
+        error: `Unknown mode: ${mode}. Use 'overview', 'file', or 'symbol'.`,
+      }) }],
+    };
+  }
+
+  const format = (args.format as MapFormat | undefined) ?? "markdown";
+  if (format !== "markdown" && format !== "json") {
+    return {
+      content: [{ type: "text", text: JSON.stringify({
+        error: `Unknown format: ${format}. Use 'markdown' or 'json'.`,
+      }) }],
+    };
+  }
+
+  if (mode === "file" && typeof args.path !== "string") {
+    return {
+      content: [{ type: "text", text: JSON.stringify({
+        error: "mode='file' requires 'path' (absolute file path)",
+      }) }],
+    };
+  }
+  if (mode === "symbol" && typeof args.name !== "string") {
+    return {
+      content: [{ type: "text", text: JSON.stringify({
+        error: "mode='symbol' requires 'name' (symbol identifier)",
+      }) }],
+    };
+  }
+
+  // Read files from disk with the same guards `runAnalysis` applies.
+  const loaded: Array<{ path: string; content: string }> = [];
+  const warnings: string[] = [];
+  for (const p of files as string[]) {
+    try {
+      const stat = statSync(p);
+      if (stat.size > MAX_FILE_SIZE) {
+        warnings.push(`Skipped ${p}: file exceeds ${MAX_FILE_SIZE} bytes`);
+        continue;
+      }
+      loaded.push({ path: p, content: readFileSync(p, "utf-8") });
+    } catch (e: unknown) {
+      warnings.push(`Skipped ${p}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+  if (loaded.length === 0) {
+    return {
+      content: [{ type: "text", text: JSON.stringify({
+        error: "No files could be read",
+        warnings,
+      }) }],
+    };
+  }
+
+  try {
+    const cacheOpts = args.cache === true ? { repoKey: defaultRepoKey() } : undefined;
+    const graph = await extractGraph(loaded, cacheOpts ? { cache: cacheOpts } : {});
+
+    // Negative `max_exports` slices from the end (`ranked.slice(0, -1)`),
+    // which is nonsensical. Clamp to ≥0 so the user gets "no top exports"
+    // instead of "all except the last."
+    const rawMax = typeof args.max_exports === "number" ? args.max_exports : undefined;
+    const maxExportsPerFile = rawMax !== undefined ? Math.max(0, rawMax) : undefined;
+
+    let payload: unknown;
+    if (mode === "overview") {
+      const include = Array.isArray(args.include)
+        ? (args.include as unknown[]).filter((s): s is string => typeof s === "string")
+        : undefined;
+      payload = buildOverview(graph, { include, maxExportsPerFile });
+    } else if (mode === "file") {
+      const detail = buildFileDetail(graph, args.path as string);
+      if (!detail) {
+        return {
+          content: [{ type: "text", text: JSON.stringify({
+            error: `No FileNode for path '${args.path}'. Ensure it was included in 'files' and is a supported language.`,
+            warnings: warnings.length > 0 ? warnings : undefined,
+          }) }],
+        };
+      }
+      payload = detail;
+    } else {
+      payload = buildSymbolDetail(graph, args.name as string);
+    }
+
+    if (format === "json") {
+      const withWarnings = warnings.length > 0 ? { ...(payload as object), warnings } : payload;
+      return {
+        content: [{ type: "text", text: JSON.stringify(withWarnings, null, 2) }],
+      };
+    }
+    const rendered = renderMap(payload as Parameters<typeof renderMap>[0], "markdown");
+    return {
+      content: [{
+        type: "text",
+        text: warnings.length > 0
+          ? `${rendered}\n\n---\nWarnings:\n${warnings.map((w) => `- ${w}`).join("\n")}`
+          : rendered,
+      }],
+    };
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return {
+      content: [{ type: "text", text: JSON.stringify({ error: msg }) }],
+    };
+  }
+}
+
 async function handleCraft(
   library: SkillLibrary,
   args: Record<string, unknown>,
@@ -907,6 +1099,8 @@ export async function createChiasmusServer(
         return handleCraft(library, args ?? {});
       case "chiasmus_review":
         return handleReview(args ?? {});
+      case "chiasmus_map":
+        return handleMap(args ?? {});
       default:
         return {
           content: [

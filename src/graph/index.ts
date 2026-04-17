@@ -26,3 +26,16 @@ export type { Hub, Bridge, SurprisingConnection } from "./insights.js";
 export { graphDiff } from "./diff.js";
 export type { GraphDiffResult, GraphDiffEdge } from "./diff.js";
 export { detectEntryPoints } from "./entry-points.js";
+export { buildOverview, buildFileDetail, buildSymbolDetail, renderMap, globMatch } from "./map.js";
+export type {
+  OverviewMap,
+  OverviewFile,
+  OverviewSummary,
+  DirNode,
+  FileDetail,
+  SymbolDetail,
+  SymbolEntry,
+  MapFormat,
+  AnyMap,
+  BuildOverviewOptions,
+} from "./map.js";

@@ -141,6 +141,22 @@ chiasmus_graph files=[...] analysis="diff" against="main" cache=true
 
 `chiasmus_review` accepts `delta_against="<snapshot>"` — when set, a phase 0 diffs against the snapshot, impact-checks removed symbols, and scopes later phases to what the PR actually changed.
 
+**`chiasmus_map`** — Pre-built codebase map for agents to consult **before** bulk file reads. Reuses the same tree-sitter extraction + cache as `chiasmus_graph`; returns a compact outline so an LLM can answer "what's in this repo" / "what does this file expose" / "where is X defined" without opening source.
+
+```
+chiasmus_map files=["src/**/*.ts"]
+→ markdown outline: per-file headlines, exports with signatures,
+  token estimates, leading doc comments
+
+chiasmus_map files=[...] mode="file" path="src/server.ts" format="json"
+→ { exports, imports grouped by source, all top-level symbols }
+
+chiasmus_map files=[...] mode="symbol" name="handleRequest"
+→ { defines: [{file, line, signature}], callers, callees }
+```
+
+Modes: `overview` (default), `file`, `symbol`. Output: `markdown` (default) or `json`. `include` globs and `max_exports` (clamped to ≥0) scope the overview. `cache=true` reuses the shared per-file cache.
+
 **`chiasmus_skills`** — Search the template library. Ships with 8 starter templates covering authorization, configuration, dependency resolution, validation, rule inference, and graph reachability. By-name lookups include related template suggestions.
 
 **`chiasmus_formalize`** — Find the best template for a problem, get slot-filling instructions plus suggestions for related verification checks. Fill the slots using your context, then call `chiasmus_verify`.

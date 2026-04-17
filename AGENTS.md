@@ -178,21 +178,76 @@ describe("Z3Solver", () => {
 
 ## MCP Tools
 
-9 tools exposed via MCP (defined in `src/mcp-server.ts`):
+10 tools exposed via MCP (defined in `src/mcp-server.ts`):
 
 | Tool | Requires LLM? | Purpose |
 |------|:---:|---------|
-| `chiasmus_verify` | No | Submit raw SMT-LIB or Prolog → verified result |
+| `chiasmus_verify` | No | Submit raw SMT-LIB or Prolog → verified result. Also accepts `format="mermaid"` → parses flowchart/stateDiagram into Prolog facts automatically. |
 | `chiasmus_skills` | No | Search/list formalization templates |
 | `chiasmus_formalize` | No* | Find template + slot-filling instructions |
 | `chiasmus_solve` | Yes | End-to-end: template → fill → lint → verify → correct |
 | `chiasmus_learn` | Yes | Extract reusable template from verified solution |
 | `chiasmus_lint` | No | Fast structural validation without running solver |
-| `chiasmus_graph` | No | Source code call graph analysis (tree-sitter + Prolog) |
+| `chiasmus_graph` | No | Source code call graph analysis (tree-sitter + Prolog / native O(V+E)). 16 analyses; see below. Supports per-file content-hash cache (`cache=true`) + named graph snapshots (`save_snapshot`, `against`). |
+| `chiasmus_map` | No | Pre-built codebase map: repo outline, per-file detail, or symbol lookup. Share with an LLM **before** bulk file reads to cut redundant reads/greps. Three modes (`overview`/`file`/`symbol`), markdown or JSON. Reuses the same tree-sitter extraction + per-file cache as `chiasmus_graph`. |
 | `chiasmus_craft` | No | Create new template from LLM-designed spec |
-| `chiasmus_review` | No | Return phased code-review recipe (graph analyses + verification templates) |
+| `chiasmus_review` | No | Return phased code-review recipe (graph analyses + verification templates). `delta_against=<snapshot>` enables PR-scoped review: a phase 0 diffs against the snapshot and scopes later phases to changed symbols. |
 
 *`chiasmus_formalize` uses a dummy LLM that returns "" when no API key is set — it still selects the template.
+
+### `chiasmus_graph` analyses
+
+Defined by `GRAPH_ANALYSES` in `src/mcp-server.ts` and dispatched by `runAnalysis` in `src/graph/analyses.ts`:
+
+| Analysis | Required args | Purpose |
+|---|---|---|
+| `summary` | — | Overview counts (nodes, edges, languages) |
+| `callers` | `target` | Direct callers of `target` |
+| `callees` | `target` | Direct callees of `target` |
+| `reachability` | `from`, `to` | Boolean: can `from` reach `to`? |
+| `path` | `from`, `to` | Shortest call chain `from → … → to` |
+| `impact` | `target` | Transitive callers (who is affected by a change) |
+| `dead-code` | *(opt.)* `entry_points` | Symbols unreachable from entry points; auto-detects exports when omitted |
+| `cycles` | — | Circular call dependencies |
+| `layer-violation` | — | Calls that skip layers (e.g. handler → db bypassing service) |
+| `communities` | — | Louvain clusters (seed=42) with cohesion scores |
+| `hubs` | — | Top-degree nodes |
+| `bridges` | — | Top betweenness — nodes connecting otherwise-separate subgraphs |
+| `surprises` | — | Cross-community + peripheral → hub edges |
+| `diff` | `against` | Current graph vs a saved snapshot; covers nodes, edges, imports, exports, hyperedges |
+| `entry-points` | — | Zero-in-degree exports (feeds `dead-code`) |
+| `facts` | *(opt.)* `include_insights` | Raw Prolog facts for `chiasmus_verify`. `include_insights=true` also emits `community/2`, `cohesion/2`, `hub/2`, `bridge/2` |
+
+Cache + snapshot workflow:
+
+- `cache=true` enables the SHA256 per-file extraction cache (`~/.cache/chiasmus` or `$CHIASMUS_CACHE_DIR`). Unchanged files skip re-parsing across calls.
+- `save_snapshot="main"` persists the extracted `CodeGraph` under a name; requires `cache=true`.
+- `analysis="diff"` + `against="main"` compares current extraction to that snapshot.
+- Guard: `save_snapshot` and `against` naming the same snapshot is rejected — otherwise the save would clobber the baseline before the diff runs.
+
+### `chiasmus_map` modes
+
+Returns a compact projection of the tree-sitter graph. Implemented in `src/graph/map.ts`, wired in `handleMap` (`src/mcp-server.ts`). Purpose: hand an LLM a pre-built outline so it doesn't re-read/grep files to learn what's there.
+
+| Mode | Required args | Output |
+|---|---|---|
+| `overview` *(default)* | `files` | Dir-grouped outline: per-file headlines with language, line count, token estimate, leading doc, exports with signatures |
+| `file` | `files`, `path` | Single-file detail: exports, imports grouped by source, all top-level symbols |
+| `symbol` | `files`, `name` | Where `name` is defined (file + line + signature) plus direct callers and callees |
+
+Options:
+- `format`: `"markdown"` *(default)* or `"json"`. Markdown is optimised for LLM consumption; JSON for programmatic use.
+- `include`: array of glob patterns to filter overview (`**`, `*`, `?` supported). E.g. `["**/src/**"]`.
+- `max_exports`: cap on exports-per-file surfaced in overview (default 8; negative values clamp to 0).
+- `cache=true`: reuse the shared per-file extraction cache (same directory and invalidation as `chiasmus_graph`).
+
+Data sources (added to `CodeGraph` for this feature):
+- `FileNode.fileDoc` — language-specific, idiomatic doc only: TS/JS JSDoc `/** */`, Python `"""..."""` module docstring, Go `//` package-doc comments. Plain `//` line comments in TS/JS, `#` comments in Python, and `;` comments in Clojure are intentionally rejected (usually license/shebang noise).
+- `FileNode.tokenEstimate` — `ceil(content.length / 3.5)` so an agent can read-budget.
+- `FileNode.lineCount` — newline-count with trailing-line adjustment.
+- `DefinesFact.signature` — params + return type (TS/JS/Python/Go); arglist vector for Clojure `defn` and `defprotocol`/`definterface` methods.
+- TypeScript exports now also include `interface`, `type`, and `enum` declarations, so `exportCount` reflects the full public surface.
+- Cache schema bumped to `"2"` for this change — pre-existing caches auto-invalidate on upgrade.
 
 ## Gotchas
 
