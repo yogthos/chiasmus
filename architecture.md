@@ -160,10 +160,13 @@ New normalization patterns discovered during use get saved back to the template,
 | `chiasmus_skills` | Search/list templates in the skill library | No |
 | `chiasmus_learn` | Extract a new candidate skill from a verified solution | Yes |
 | `chiasmus_lint` | Fast structural validation without running the solver | No |
-| `chiasmus_graph` | Source-code call-graph analysis (16 analyses incl. communities, hubs, bridges, diff, entry-points) | No |
+| `chiasmus_graph` | Source-code call-graph analysis (16 analyses incl. communities, hubs, bridges, diff, entry-points). TS/JS emits `calleeQN` + `imports.resolved` when inferable. | No |
+| `chiasmus_map` | Pre-built codebase outline for pre-read agent context (overview / file / symbol) | No |
+| `chiasmus_search` | Semantic code search over a file set (embeddings + cosine similarity) | Embedding† |
 | `chiasmus_review` | Phased code-review recipe with optional PR-delta scope | No |
 
 *`chiasmus_formalize` selects the template server-side; the calling LLM fills slots.
+†`chiasmus_search` needs an embedding provider via env (`OPENAI_API_KEY` / `DEEPSEEK_API_KEY` / `OPENROUTER_API_KEY`).
 
 ## Solver Engines
 

@@ -54,10 +54,10 @@ src/
 │   ├── learner.ts         # SkillLearner — LLM-driven template extraction from solutions
 │   └── relationships.ts   # Template relationship/suggestion graph
 ├── graph/
-│   ├── types.ts           # CodeGraph, LanguageAdapter, FileNode, Hyperedge, DefinesFact, etc.
+│   ├── types.ts           # CodeGraph, LanguageAdapter, FileNode, Hyperedge, DefinesFact, CallsFact.calleeQN, ImportsFact.resolved, FileTypeInfo
 │   ├── parser.ts          # tree-sitter lang registry + sync/async parse for TS/JS/Py/Go/Clojure
-│   ├── extractor.ts       # AST walking + per-language call graph extraction
-│   ├── facts.ts           # graphToProlog — CodeGraph → Prolog facts + rules
+│   ├── extractor.ts       # AST walking + per-language call graph extraction + TS/JS collectTypeInfo
+│   ├── facts.ts           # graphToProlog — CodeGraph → Prolog facts (incl. calls_qn/3, imports_resolved/3)
 │   ├── analyses.ts        # runAnalysis — dispatches all graph analyses
 │   ├── native-analyses.ts # O(V+E) cycles/reachability/impact/dead-code/callers/callees
 │   ├── graph-util.ts      # Shared helpers: buildUndirectedGraph, forEachUndirectedEdge, undirectedDegree
@@ -67,12 +67,21 @@ src/
 │   ├── entry-points.ts    # Heuristic entry-point detection (zero-in-degree exports)
 │   ├── cache.ts           # SHA256 per-file cache + LRU eviction + named snapshots (proper-lockfile)
 │   ├── mermaid.ts         # parseMermaid — Mermaid flowcharts/state diagrams → Prolog facts
+│   ├── type-env.ts        # TS/JS three-tier type inference + class field/method extraction
+│   ├── resolve-calls.ts   # Project-wide QN resolution: inheritance-aware field/method registry
+│   ├── tsconfig-aliases.ts # Parses tsconfig.json paths/baseUrl with JSONC + extends chain
+│   ├── suffix-index.ts    # Suffix index over batch files for relative import resolution
 │   └── adapter-registry.ts # Auto-discovery of chiasmus-adapter-* npm packages
+├── search/
+│   ├── engine.ts          # buildSearchCorpus + runSearch — cosine-sim code search
+│   ├── vector-store.ts    # In-process linear-scan store; serializable
+│   ├── embedding-cache.ts # SHA-256-keyed persistent cache, atomic writes
+│   └── index.ts           # Module exports
 ├── llm/
-│   ├── types.ts           # LLMAdapter interface, LLMMessage
-│   ├── anthropic.ts       # Anthropic/DeepSeek/OpenAI provider factory (createLLMFromEnv)
-│   ├── openai-compatible.ts # OpenAI-compatible API adapter
-│   └── mock.ts            # Mock LLM for testing
+│   ├── types.ts           # LLMAdapter + EmbeddingAdapter interfaces, LLMMessage
+│   ├── anthropic.ts       # Anthropic/DeepSeek/OpenAI provider factories (createLLMFromEnv, createEmbeddingFromEnv)
+│   ├── openai-compatible.ts # OpenAI-compatible chat + embedding adapters
+│   └── mock.ts            # Mock LLM + MockEmbeddingAdapter for testing
 tests/                      # Unit tests (mirrors src/ structure)
 benchmark/                  # Benchmark problems (5 problems × traditional + chiasmus implementations)
 ```
@@ -106,9 +115,16 @@ type SolverInput =
 interface LLMAdapter {
   complete(system: string, messages: LLMMessage[]): Promise<string>;
 }
+
+interface EmbeddingAdapter {
+  embed(texts: string[]): Promise<number[][]>;
+  dimension(): number;
+}
 ```
 
-Provider priority: `ANTHROPIC_API_KEY` → `DEEPSEEK_API_KEY` → `OPENAI_API_KEY`.
+LLM provider priority: `ANTHROPIC_API_KEY` → `DEEPSEEK_API_KEY` → `OPENAI_API_KEY`.
+
+Embedding provider priority (Anthropic has no embeddings): `OPENAI_API_KEY` → `DEEPSEEK_API_KEY` → `OPENROUTER_API_KEY`. Override the model via `CHIASMUS_EMBED_MODEL` (default `text-embedding-3-small`), URL via `CHIASMUS_EMBED_URL`, and dimension via `CHIASMUS_EMBED_DIM`.
 
 ## Conventions
 
@@ -178,7 +194,7 @@ describe("Z3Solver", () => {
 
 ## MCP Tools
 
-10 tools exposed via MCP (defined in `src/mcp-server.ts`):
+11 tools exposed via MCP (defined in `src/mcp-server.ts`):
 
 | Tool | Requires LLM? | Purpose |
 |------|:---:|---------|
@@ -188,12 +204,14 @@ describe("Z3Solver", () => {
 | `chiasmus_solve` | Yes | End-to-end: template → fill → lint → verify → correct |
 | `chiasmus_learn` | Yes | Extract reusable template from verified solution |
 | `chiasmus_lint` | No | Fast structural validation without running solver |
-| `chiasmus_graph` | No | Source code call graph analysis (tree-sitter + Prolog / native O(V+E)). 16 analyses; see below. Supports per-file content-hash cache (`cache=true`) + named graph snapshots (`save_snapshot`, `against`). |
+| `chiasmus_graph` | No | Source code call graph analysis (tree-sitter + Prolog / native O(V+E)). 16 analyses; see below. Supports per-file content-hash cache (`cache=true`) + named graph snapshots (`save_snapshot`, `against`). TS/JS carry qualified callees (`calleeQN`) and resolved imports (`resolved`) when inferable. |
 | `chiasmus_map` | No | Pre-built codebase map: repo outline, per-file detail, or symbol lookup. Share with an LLM **before** bulk file reads to cut redundant reads/greps. Three modes (`overview`/`file`/`symbol`), markdown or JSON. Reuses the same tree-sitter extraction + per-file cache as `chiasmus_graph`. |
+| `chiasmus_search` | Embed† | Semantic code search over a set of files. NL query → ranked list of callable defines via embeddings + cosine similarity. Caches embeddings by content SHA-256 under `$CHIASMUS_HOME/embeddings`. |
 | `chiasmus_craft` | No | Create new template from LLM-designed spec |
 | `chiasmus_review` | No | Return phased code-review recipe (graph analyses + verification templates). `delta_against=<snapshot>` enables PR-scoped review: a phase 0 diffs against the snapshot and scopes later phases to changed symbols. |
 
 *`chiasmus_formalize` uses a dummy LLM that returns "" when no API key is set — it still selects the template.
+†`chiasmus_search` needs an embedding provider, picked up from `OPENAI_API_KEY` / `DEEPSEEK_API_KEY` / `OPENROUTER_API_KEY` (overridable via `CHIASMUS_EMBED_MODEL`, `CHIASMUS_EMBED_URL`, `CHIASMUS_EMBED_DIM`).
 
 ### `chiasmus_graph` analyses
 
@@ -247,7 +265,42 @@ Data sources (added to `CodeGraph` for this feature):
 - `FileNode.lineCount` — newline-count with trailing-line adjustment.
 - `DefinesFact.signature` — params + return type (TS/JS/Python/Go); arglist vector for Clojure `defn` and `defprotocol`/`definterface` methods.
 - TypeScript exports now also include `interface`, `type`, and `enum` declarations, so `exportCount` reflects the full public surface.
-- Cache schema bumped to `"2"` for this change — pre-existing caches auto-invalidate on upgrade.
+- Cache schema is currently `"3"` (bumped when `CodeGraph._typeInfo` and `CallsFact.calleeQN` landed). Older caches auto-invalidate on upgrade.
+
+### TS/JS qualified-name resolution
+
+Two passes, both best-effort (failure never blocks the base graph):
+
+1. **Per-file** (`collectTypeInfo` in `src/graph/extractor.ts`) — walks each TS/JS AST to extract:
+   - class/interface `extends` edges (both `class_heritage > extends_clause` and the interface-direct `extends_type_clause` shape),
+   - class/interface fields (`extractClassFields` in `type-env.ts`) + methods (`method_definition` and interface `method_signature`),
+   - pending call sites with their receiver chain (e.g. `['this', 'svc']` + `login`),
+   - per-scope local variable types (Tier 0 annotation → Tier 1 `new` → Tier 2 assignment-chain inference).
+   Wrapped in try/catch — an unexpected AST shape drops only the QN data for that file.
+
+2. **Project-wide** (`resolveCallsWithRegistry` in `src/graph/resolve-calls.ts`) — merges per-file type info into:
+   - `ClassFieldRegistry` with inheritance propagation (child fields shadow parent).
+   - `ClassMethodRegistry` exposing `{ own, flat, parents }` so the resolver can verify a method exists on the receiver type *and* walk up to find the declaring class (`Child.run()` → `Svc.run` when `run` is only defined on `Svc`).
+   - `JS_BUILTIN_TYPES` blacklist rejects builtins (`Map`, `Promise`, `any`, `string`, `ReadonlySet`, …) so their prototype methods don't leak into QNs.
+   - Fallbacks: (a) unique method owner via `graph.contains`, (b) unique flat-registry owner. Ambiguous names stay without a QN rather than guess.
+
+Matching `CallsFact`s get their `calleeQN = "Class.method"`. Emitted as `calls_qn/3` Prolog facts alongside back-compat `calls/2`.
+
+### Import resolution
+
+`extractGraph(files, { repoPath })` resolves each `ImportsFact.source` to a repo-relative `resolved` path when possible:
+- `tsconfig-aliases.ts` parses `tsconfig.json` (JSONC + `extends`, cycle-safe) and rewrites `@/foo` → `src/foo`.
+- `suffix-index.ts` builds a suffix index over the batch file paths. Relative imports (`./foo`, `../foo`) resolve **exactly** from the importing file's directory — no fallback to shorter suffixes, so a stale batch doesn't silently match an unrelated same-basename file.
+- External packages and bare specifiers stay `resolved=undefined`.
+- If `repoPath` is omitted, the longest common ancestor of the batch is used. Emitted as `imports_resolved/3` Prolog facts.
+
+### Semantic search (`chiasmus_search`)
+
+- Corpus = one entry per callable define (function or method) — text is `name + signature + fileDoc + 6-line body snippet`, capped at 2000 chars.
+- `VectorStore` — linear-scan cosine similarity; L2-normalized on query; serializable. Correct up to ~10k vectors; swap in an HNSW backing if the corpus grows.
+- `EmbeddingCache` — SHA-256(content) keyed, one JSON file per dimension under `$CHIASMUS_HOME/embeddings/dN.json`. Atomic writes via `.tmp + rename`. Dimension mismatch on load silently discards (clean model swap).
+- `OpenAICompatibleEmbeddingAdapter` batches 96 inputs per request and preserves order via the response `index` field.
+- First call with unknown dimension (no `CHIASMUS_EMBED_DIM` set) skips the cache — dimension is learned from the response and subsequent calls cache normally.
 
 ## Gotchas
 

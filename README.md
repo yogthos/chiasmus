@@ -126,6 +126,8 @@ Analyses: `summary`, `callers`, `callees`, `reachability`, `dead-code`, `cycles`
 
 Reachability-heavy analyses (`cycles`, `reachability`, `path`, `impact`, `dead-code`, `callers`, `callees`) run on native O(V+E) graph algorithms and scale to codebases with thousands of functions. `communities` uses Louvain; `bridges` uses exact betweenness centrality. The `facts` analysis emits raw Prolog for use with `chiasmus_verify`, capped at 10 MB — above that limit the result is `{ error, size, limit }` rather than a program string, so narrow the file set or call a specific analysis directly. Opt in to `include_insights=true` on `facts` to also emit `community/2`, `cohesion/2`, `hub/2`, `bridge/2` predicates.
 
+TS/JS calls also carry qualified-name hints when the receiver's class can be inferred (`CallsFact.calleeQN = "Class.method"`), and imports are resolved through `tsconfig.json` path aliases and the batch's file layout (`ImportsFact.resolved = "<repo-relative path>"`). Both surface as additive Prolog facts — `calls_qn/3` and `imports_resolved/3` — so back-compat queries over `calls/2` and `imports/3` keep working.
+
 ### Persistent cache and PR diff
 
 Pass `cache=true` on `chiasmus_graph` to enable a per-file content-hash cache — unchanged files skip re-parsing across calls. On a 42-file TypeScript repo, warm hits run at ~2.5ms vs ~170ms cold (60× speedup). Cache lives under `$CHIASMUS_CACHE_DIR` (default `~/.cache/chiasmus`) with an LRU budget per repo.
@@ -198,6 +200,19 @@ chiasmus_review files=["src/handler.ts", "src/db.ts"] focus="all"
 Focus modes subset the phases: `all` (default, 7 phases), `quick` (overview + architecture), `architecture` (structural defects + impact), `security` (taint + resource pairing + auth), `correctness` (invariants + boundaries + state machines).
 
 Each action carries an `interpret` field describing how to score the result. After all phases, emit a numbered issue list with severity labels and file:line references.
+
+**`chiasmus_search`** — Semantic code search over a set of files. Finds functions and methods whose *meaning* matches a natural-language query (e.g. "where do we refresh OAuth tokens", "rate-limit logic"). Uses embeddings + cosine similarity over callable defines; returns a ranked list with `{name, file, line, signature, leadingDoc, score}`.
+
+```
+chiasmus_search query="refresh OAuth tokens" files=["src/**/*.ts"] top_k=5
+→ { hits: [
+    { name: "refreshAccessToken", file: "src/auth/token.ts", line: 42, score: 0.78, ... },
+    { name: "rotateSession", file: "src/auth/session.ts", line: 118, score: 0.71, ... },
+    ...
+  ] }
+```
+
+Opt-in: needs an embedding provider via env (`OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, or `OPENROUTER_API_KEY`). Override the model with `CHIASMUS_EMBED_MODEL` (default `text-embedding-3-small`), base URL with `CHIASMUS_EMBED_URL`, and dimension with `CHIASMUS_EMBED_DIM`. Embeddings are cached by content SHA-256 under `$CHIASMUS_HOME/embeddings` — unchanged code is not re-embedded.
 
 **`chiasmus_learn`** — Extract a reusable template from a verified solution. Candidates get promoted after 3+ successful reuses.
 
