@@ -1,5 +1,7 @@
-export { createLLMFromEnv, AnthropicAdapter } from "./anthropic.js";
+export { createLLMFromEnv, createEmbeddingFromEnv, AnthropicAdapter } from "./anthropic.js";
 export type { AnthropicConfig } from "./anthropic.js";
-export { OpenAICompatibleAdapter } from "./openai-compatible.js";
-export type { OpenAICompatibleConfig } from "./openai-compatible.js";
-export type { LLMAdapter, LLMMessage } from "./types.js";
+export { OpenAICompatibleAdapter, OpenAICompatibleEmbeddingAdapter } from "./openai-compatible.js";
+export type { OpenAICompatibleConfig, OpenAICompatibleEmbeddingConfig } from "./openai-compatible.js";
+export { MockEmbeddingAdapter } from "./mock.js";
+export type { MockEmbeddingConfig } from "./mock.js";
+export type { LLMAdapter, LLMMessage, EmbeddingAdapter } from "./types.js";

@@ -12,8 +12,11 @@ export type { LintResult, FormalizeResult, SolveResult } from "./formalize/index
 export { SkillLibrary, SkillLearner, craftTemplate, validateTemplate } from "./skills/index.js";
 export type { SearchOptions, CraftInput, CraftResult, SkillTemplate, SlotDef, Normalization, SkillMetadata, SkillWithMetadata, SkillSearchResult } from "./skills/index.js";
 
-export { createLLMFromEnv, AnthropicAdapter, OpenAICompatibleAdapter } from "./llm/index.js";
-export type { AnthropicConfig, OpenAICompatibleConfig, LLMAdapter, LLMMessage } from "./llm/index.js";
+export { createLLMFromEnv, createEmbeddingFromEnv, AnthropicAdapter, OpenAICompatibleAdapter, OpenAICompatibleEmbeddingAdapter, MockEmbeddingAdapter } from "./llm/index.js";
+export type { AnthropicConfig, OpenAICompatibleConfig, OpenAICompatibleEmbeddingConfig, MockEmbeddingConfig, LLMAdapter, LLMMessage, EmbeddingAdapter } from "./llm/index.js";
+
+export { VectorStore, EmbeddingCache, buildSearchCorpus, runSearch } from "./search/index.js";
+export type { VectorRecord, VectorSearchHit, VectorStoreConfig, EmbeddingCacheConfig, SearchCorpusEntry, SearchHit, RunSearchOptions } from "./search/index.js";
 
 export { buildReviewPlan } from "./review.js";
 export type { ReviewFocus, ReviewRequest, ReviewAction, ReviewPhase, ReviewPlan, SuggestedTemplate, ReviewReporting } from "./review.js";

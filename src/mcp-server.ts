@@ -16,8 +16,10 @@ import { SkillLibrary } from "./skills/library.js";
 import { FormalizationEngine } from "./formalize/engine.js";
 import { SkillLearner } from "./skills/learner.js";
 import { lintSpec } from "./formalize/validate.js";
-import { createLLMFromEnv } from "./llm/anthropic.js";
-import type { LLMAdapter } from "./llm/types.js";
+import { createLLMFromEnv, createEmbeddingFromEnv } from "./llm/anthropic.js";
+import type { EmbeddingAdapter, LLMAdapter } from "./llm/types.js";
+import { buildSearchCorpus, runSearch } from "./search/engine.js";
+import { EmbeddingCache } from "./search/embedding-cache.js";
 import type { SolverResult } from "./solvers/types.js";
 import { runAnalysis, MAX_FILE_SIZE } from "./graph/analyses.js";
 import type { AnalysisType } from "./graph/analyses.js";
@@ -474,6 +476,40 @@ Set cache=true to reuse the per-file extraction cache across calls.`,
         },
       },
       required: ["files"],
+    },
+  },
+  {
+    name: "chiasmus_search",
+    description: `Semantic code search over a set of files. Finds functions and methods whose meaning matches a natural-language query.
+
+Uses embeddings + cosine similarity. Returns a ranked list of {name, file, line, signature, leadingDoc, score}. Ranking is by closeness of the concept, NOT by exact name match — use this when you're looking for "where do we refresh OAuth tokens" or "rate-limit logic" across an unfamiliar codebase.
+
+Absolute paths only. Languages: TypeScript, JavaScript, Python, Go, Clojure.
+
+Requires an embedding provider configured via env:
+  OPENAI_API_KEY / DEEPSEEK_API_KEY / OPENROUTER_API_KEY  → auto-detected
+  CHIASMUS_EMBED_MODEL  → default 'text-embedding-3-small'
+  CHIASMUS_EMBED_URL, CHIASMUS_EMBED_DIM  → overrides
+
+Caches embeddings by content SHA-256 under \$CHIASMUS_HOME/embeddings — unchanged code is not re-embedded.`,
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        query: {
+          type: "string",
+          description: "Natural-language description of what you're looking for",
+        },
+        files: {
+          type: "array",
+          items: { type: "string" },
+          description: "Absolute file paths to include in the search corpus",
+        },
+        top_k: {
+          type: "number",
+          description: "Max results to return (default 10; clamped to [1, 100])",
+        },
+      },
+      required: ["query", "files"],
     },
   },
 ];
@@ -1024,6 +1060,135 @@ async function handleMap(args: Record<string, unknown>): Promise<CallToolResult>
   }
 }
 
+/** Longest common absolute-path prefix across the given paths. */
+function commonPathAncestor(paths: string[]): string {
+  if (paths.length === 0) return "/";
+  const parts = paths.map((p) => p.split("/").filter(Boolean));
+  if (parts.length === 1) {
+    const p = [...parts[0]];
+    p.pop();
+    return "/" + p.join("/");
+  }
+  let i = 0;
+  const min = Math.min(...parts.map((p) => p.length));
+  while (i < min) {
+    const seg = parts[0][i];
+    if (!parts.every((p) => p[i] === seg)) break;
+    i++;
+  }
+  return "/" + parts[0].slice(0, i).join("/");
+}
+
+async function handleSearch(
+  adapter: EmbeddingAdapter | null,
+  home: string,
+  args: Record<string, unknown>,
+): Promise<CallToolResult> {
+  const query = args.query;
+  const files = args.files;
+  const topKArg = args.top_k;
+
+  if (typeof query !== "string" || !query.trim()) {
+    return {
+      content: [{ type: "text", text: JSON.stringify({
+        error: "'query' (non-empty string) is required",
+      }) }],
+    };
+  }
+  if (!Array.isArray(files) || files.length === 0 || !files.every((f) => typeof f === "string")) {
+    return {
+      content: [{ type: "text", text: JSON.stringify({
+        error: "'files' (non-empty array of absolute paths) is required",
+      }) }],
+    };
+  }
+  const topK = Math.max(1, Math.min(100, typeof topKArg === "number" ? topKArg : 10));
+
+  if (!adapter) {
+    return {
+      content: [{ type: "text", text: JSON.stringify({
+        error: "No embedding provider configured. Set OPENAI_API_KEY / DEEPSEEK_API_KEY / OPENROUTER_API_KEY (see CHIASMUS_EMBED_* env vars for overrides).",
+      }) }],
+    };
+  }
+
+  const fileContents = new Map<string, string>();
+  const warnings: string[] = [];
+  for (const p of files as string[]) {
+    try {
+      const st = statSync(p);
+      if (!st.isFile()) {
+        warnings.push(`skip (not a file): ${p}`);
+        continue;
+      }
+      if (st.size > MAX_FILE_SIZE) {
+        warnings.push(`skip (over ${MAX_FILE_SIZE} bytes): ${p}`);
+        continue;
+      }
+      fileContents.set(p, readFileSync(p, "utf8"));
+    } catch (e: unknown) {
+      warnings.push(`read failed: ${p} — ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  if (fileContents.size === 0) {
+    return {
+      content: [{ type: "text", text: JSON.stringify({
+        error: "No readable files in `files`.",
+        warnings: warnings.length > 0 ? warnings : undefined,
+      }) }],
+    };
+  }
+
+  const batch = [...fileContents.entries()].map(([path, content]) => ({ path, content }));
+  const graph = await extractGraph(batch, { repoPath: commonPathAncestor(batch.map((b) => b.path)) });
+  const corpus = buildSearchCorpus(graph, fileContents);
+
+  if (corpus.length === 0) {
+    return {
+      content: [{ type: "text", text: JSON.stringify({
+        hits: [],
+        warnings: warnings.length > 0 ? warnings : undefined,
+      }) }],
+    };
+  }
+
+  let cache: EmbeddingCache | null = null;
+  try {
+    const dim = adapter.dimension();
+    const cachePath = join(home, "embeddings", `d${dim}.json`);
+    cache = new EmbeddingCache({ cachePath, dimension: dim });
+    await cache.load();
+  } catch {
+    // Dimension unknown on first use — skip cache, just embed.
+  }
+
+  let hits;
+  try {
+    hits = await runSearch({ query, corpus, adapter, topK, cache: cache ?? undefined });
+  } catch (e: unknown) {
+    return {
+      content: [{ type: "text", text: JSON.stringify({
+        error: e instanceof Error ? e.message : String(e),
+      }) }],
+    };
+  }
+  if (cache) {
+    try {
+      await cache.save();
+    } catch {
+      // Cache save failures shouldn't sink the search request.
+    }
+  }
+
+  return {
+    content: [{ type: "text", text: JSON.stringify({
+      hits,
+      warnings: warnings.length > 0 ? warnings : undefined,
+    }) }],
+  };
+}
+
 async function handleCraft(
   library: SkillLibrary,
   args: Record<string, unknown>,
@@ -1050,6 +1215,7 @@ async function handleCraft(
 export async function createChiasmusServer(
   chiasmusHome?: string,
   llmOverride?: LLMAdapter | null,
+  embeddingOverride?: EmbeddingAdapter | null,
 ): Promise<{ server: Server; library: SkillLibrary; formalizer: FormalizationEngine | null }> {
   const home = chiasmusHome ?? getChiasmusHome();
   const config = loadConfig(home);
@@ -1062,6 +1228,9 @@ export async function createChiasmusServer(
   const llm = llmOverride !== undefined ? llmOverride : createLLMFromEnv();
   const formalizer = llm ? new FormalizationEngine(library, llm) : null;
   const learner = llm ? new SkillLearner(library, llm) : null;
+  const embedding =
+    embeddingOverride !== undefined ? embeddingOverride : createEmbeddingFromEnv();
+  const embeddingHome = home;
 
   const server = new Server(
     { name: "chiasmus", version: "0.1.0" },
@@ -1101,6 +1270,8 @@ export async function createChiasmusServer(
         return handleReview(args ?? {});
       case "chiasmus_map":
         return handleMap(args ?? {});
+      case "chiasmus_search":
+        return handleSearch(embedding, embeddingHome, args ?? {});
       default:
         return {
           content: [

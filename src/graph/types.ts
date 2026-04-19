@@ -17,12 +17,27 @@ export interface DefinesFact {
 export interface CallsFact {
   caller: string;
   callee: string;
+  /**
+   * Optional fully qualified callee name when the extractor could resolve
+   * the receiver type (e.g. `src/auth.ts:AuthStorage.login`). Emitted as a
+   * `calls_qn/3` Prolog fact alongside the back-compatible `calls/2`.
+   */
+  calleeQN?: string;
 }
 
 export interface ImportsFact {
   file: string;
   name: string;
+  /** Raw import specifier as written in source (e.g. "./foo.js" or "@/lib/x"). */
   source: string;
+  /**
+   * Optional canonical file path (repo-relative) when the import resolved
+   * to a known file. Populated by the TS/JS resolver using tsconfig path
+   * aliases and a suffix index over the current extraction batch. Stays
+   * undefined for external package imports and bare specifiers with no
+   * matching in-batch file.
+   */
+  resolved?: string;
 }
 
 export interface ExportsFact {
@@ -69,6 +84,46 @@ export interface Hyperedge {
   source_file?: string;
 }
 
+/**
+ * Per-file type information used for cross-file qualified-name resolution.
+ * Emitted by the TS/JS extractor when receiver types could be inferred,
+ * merged project-wide in `extractGraph` to fill `CallsFact.calleeQN`.
+ * Internal; external consumers can ignore.
+ */
+export interface FileTypeInfo {
+  file: string;
+  /** Class name → { fieldName → typeName (short) } */
+  classFields: Array<{ className: string; fields: Record<string, string> }>;
+  /**
+   * Method names defined on each class/interface. Enables the QN
+   * resolver to verify that the final receiver type actually declares
+   * the method before emitting a `Class.method` name.
+   */
+  classMethods?: Array<{ className: string; methods: string[] }>;
+  /**
+   * `class Child extends Parent` relationships. Drives field + method
+   * inheritance in the project-wide registry. Only direct parents are
+   * tracked; the registry handles transitive extension.
+   */
+  classExtends?: Array<{ className: string; parent: string }>;
+  /** Call sites waiting for qualified-name resolution. */
+  pendingCalls: PendingCall[];
+}
+
+export interface PendingCall {
+  caller: string;
+  callee: string;
+  /**
+   * Receiver chain before the method. Empty for bare function calls
+   * (`foo()`). `['this']` for `this.foo()`. `['this', 'svc']` for
+   * `this.svc.foo()`. `['s']` for `s.foo()` where `s` is a local var.
+   */
+  receiverChain: string[];
+  enclosingClass: string | null;
+  /** varName → typeName (short) snapshot at call-site scope. */
+  varTypes: Record<string, string>;
+}
+
 export interface CodeGraph {
   defines: DefinesFact[];
   calls: CallsFact[];
@@ -77,6 +132,8 @@ export interface CodeGraph {
   contains: ContainsFact[];
   files?: FileNode[];
   hyperedges?: Hyperedge[];
+  /** Internal: per-file type info for 2-pass QN resolution. */
+  _typeInfo?: FileTypeInfo[];
 }
 
 /** User-provided language adapter for custom tree-sitter grammars */

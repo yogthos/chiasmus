@@ -1,5 +1,5 @@
-import type { LLMAdapter, LLMMessage } from "./types.js";
-import { OpenAICompatibleAdapter } from "./openai-compatible.js";
+import type { EmbeddingAdapter, LLMAdapter, LLMMessage } from "./types.js";
+import { OpenAICompatibleAdapter, OpenAICompatibleEmbeddingAdapter } from "./openai-compatible.js";
 
 const DEFAULT_MODEL = "claude-sonnet-4-6";
 const DEFAULT_URL = "https://api.anthropic.com/v1/messages";
@@ -103,6 +103,56 @@ export function createLLMFromEnv(): LLMAdapter | null {
       apiKey: openaiKey,
       baseUrl: customUrl ?? "https://api.openai.com/v1",
       model: model ?? "gpt-4o",
+    });
+  }
+
+  return null;
+}
+
+/**
+ * Create an EmbeddingAdapter from environment variables, or null if not
+ * configured. Anthropic has no embeddings API, so this checks OpenAI-
+ * compatible providers only:
+ *   OPENAI_API_KEY    → OpenAI
+ *   DEEPSEEK_API_KEY  → DeepSeek (compatible)
+ *   OPENROUTER_API_KEY → OpenRouter
+ *
+ * Override model with CHIASMUS_EMBED_MODEL, base URL with
+ * CHIASMUS_EMBED_URL, and dimension with CHIASMUS_EMBED_DIM.
+ */
+export function createEmbeddingFromEnv(): EmbeddingAdapter | null {
+  const model = process.env.CHIASMUS_EMBED_MODEL ?? "text-embedding-3-small";
+  const customUrl = process.env.CHIASMUS_EMBED_URL;
+  const dimEnv = process.env.CHIASMUS_EMBED_DIM;
+  const dimension = dimEnv ? Number.parseInt(dimEnv, 10) : undefined;
+
+  const openaiKey = process.env.OPENAI_API_KEY;
+  if (openaiKey) {
+    return new OpenAICompatibleEmbeddingAdapter({
+      apiKey: openaiKey,
+      baseUrl: customUrl ?? "https://api.openai.com/v1",
+      model,
+      dimension,
+    });
+  }
+
+  const deepseekKey = process.env.DEEPSEEK_API_KEY;
+  if (deepseekKey) {
+    return new OpenAICompatibleEmbeddingAdapter({
+      apiKey: deepseekKey,
+      baseUrl: customUrl ?? "https://api.deepseek.com",
+      model,
+      dimension,
+    });
+  }
+
+  const orKey = process.env.OPENROUTER_API_KEY;
+  if (orKey) {
+    return new OpenAICompatibleEmbeddingAdapter({
+      apiKey: orKey,
+      baseUrl: customUrl ?? "https://openrouter.ai/api/v1",
+      model,
+      dimension,
     });
   }
 
