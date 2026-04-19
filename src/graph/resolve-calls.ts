@@ -1,5 +1,4 @@
 // Portions adapted from pi-code-graph (MIT) https://github.com/picassio/pi-code-graph
-// Original copyright: see LICENSE-pi-code-graph
 //
 // Project-wide qualified-name resolution for TS/JS call graphs.
 // Combines per-file class field maps into a project registry, then walks

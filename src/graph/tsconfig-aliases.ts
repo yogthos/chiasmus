@@ -1,5 +1,4 @@
 // Portions adapted from pi-code-graph (MIT) https://github.com/picassio/pi-code-graph
-// Original copyright: see LICENSE-pi-code-graph
 //
 // tsconfig.json path-alias resolver.
 // Parses TypeScript `compilerOptions.paths` (and `baseUrl`) so that

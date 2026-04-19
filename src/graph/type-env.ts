@@ -1,5 +1,4 @@
 // Portions adapted from pi-code-graph (MIT) https://github.com/picassio/pi-code-graph
-// Original copyright: see LICENSE-pi-code-graph
 //
 // Per-file type environment for TypeScript/JavaScript.
 // Three tiers of inference (run in order per file):

@@ -1,5 +1,4 @@
 // Portions adapted from pi-code-graph (MIT) https://github.com/picassio/pi-code-graph
-// Original copyright: see LICENSE-pi-code-graph
 //
 // Suffix-based import resolution. Imports in TS/JS can omit the
 // extension and use shorter path suffixes; this index maps each known
