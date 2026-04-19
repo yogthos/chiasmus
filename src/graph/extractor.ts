@@ -1,7 +1,12 @@
 import { parseSource, parseSourceAsync, getLanguageForFile } from "./parser.js";
 import { getAdapter } from "./adapter-registry.js";
 import { checkFileCache, saveFileCache, type CacheOptions } from "./cache.js";
-import type { CodeGraph, DefinesFact, CallsFact, ImportsFact, ExportsFact, ContainsFact, FileNode } from "./types.js";
+import type { CodeGraph, DefinesFact, CallsFact, ImportsFact, ExportsFact, ContainsFact, FileNode, FileTypeInfo, PendingCall } from "./types.js";
+import { extractClassFields, extractSimpleTypeName } from "./type-env.js";
+import { buildClassFieldRegistry, resolveCallsWithRegistry } from "./resolve-calls.js";
+import { loadTsconfigAliases, EMPTY_TSCONFIG_ALIASES, type TsconfigAliasMap } from "./tsconfig-aliases.js";
+import { buildSuffixIndex, suffixResolveImport, EMPTY_SUFFIX_INDEX, type SuffixIndex } from "./suffix-index.js";
+import { dirname as pathDirname, relative as pathRelative, resolve as pathResolve } from "node:path";
 
 export interface ExtractOptions {
   /**
@@ -9,6 +14,112 @@ export interface ExtractOptions {
    * cache is keyed on content+path, so unchanged files skip parsing.
    */
   cache?: CacheOptions;
+  /**
+   * Repository root (absolute) used to load tsconfig.json path aliases
+   * and to compute repo-relative paths in resolved imports. When omitted,
+   * the longest common ancestor of the batch file paths is used.
+   */
+  repoPath?: string;
+}
+
+/**
+ * Longest common ancestor of the given absolute paths, used as a best-guess
+ * repo root when the caller does not supply one. Returns "/" (root) when
+ * the paths share no common prefix; returns the first path's directory
+ * when a single file is given.
+ */
+function commonAncestor(paths: string[]): string {
+  if (paths.length === 0) return "/";
+  const parts = paths.map((p) => p.split("/").filter(Boolean));
+  if (parts.length === 1) {
+    const p = parts[0];
+    p.pop();
+    return "/" + p.join("/");
+  }
+  let i = 0;
+  const min = Math.min(...parts.map((p) => p.length));
+  while (i < min) {
+    const seg = parts[0][i];
+    if (!parts.every((p) => p[i] === seg)) break;
+    i++;
+  }
+  const common = parts[0].slice(0, i);
+  if (common.length === 0) return "/";
+  return "/" + common.join("/");
+}
+
+/**
+ * Resolve each ImportsFact.source to a canonical file path (repo-relative)
+ * using tsconfig aliases + a suffix index over the batch files. Mutates
+ * the graph in place.
+ */
+function resolveImportsInPlace(
+  graph: CodeGraph,
+  repoPath: string,
+  aliases: TsconfigAliasMap,
+  suffix: SuffixIndex,
+): void {
+  if (!aliases.hasAliases && suffix.size === 0) return;
+  // Cache keyed on (sourceDir + source) — the resolution depends on both
+  // because "./foo" means different things from different directories.
+  const cache = new Map<string, string | null>();
+  for (const imp of graph.imports) {
+    if (imp.resolved) continue;
+    const source = imp.source;
+    if (!source) continue;
+    const srcDir = pathDirname(imp.file);
+    const cacheKey = `${srcDir}\0${source}`;
+    const cached = cache.get(cacheKey);
+    if (cached !== undefined) {
+      if (cached) imp.resolved = cached;
+      continue;
+    }
+    const isRelative = source.startsWith("./") || source.startsWith("../");
+    let resolved: string | null = null;
+
+    if (isRelative) {
+      // Relative imports must resolve EXACTLY from the importing file's
+      // directory. If the intended target isn't in the batch, returning
+      // null beats silently matching an unrelated same-basename file
+      // somewhere else.
+      const abs = pathResolve(srcDir, source);
+      const rel = pathRelative(repoPath, abs).replace(/\\/g, "/");
+      if (!rel.startsWith("..")) {
+        resolved = exactLookup(rel, suffix);
+      }
+    } else {
+      // Aliased or bare: try alias rewrite → suffix resolver. The shorter-
+      // suffix fallback is OK here because bare/aliased specifiers don't
+      // carry directory context.
+      const aliased = aliases.rewrite(source);
+      if (aliased !== null) {
+        resolved = suffixResolveImport(source, aliased, suffix);
+      }
+    }
+    cache.set(cacheKey, resolved);
+    if (resolved) imp.resolved = resolved;
+  }
+}
+
+/**
+ * Exact lookup for a repo-relative path (no extension) against the suffix
+ * index. Tries each candidate TS/JS extension and the `/index.ext` form.
+ * Never falls back to shorter suffixes.
+ */
+function exactLookup(rel: string, suffix: SuffixIndex): string | null {
+  const EXTS = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"] as const;
+  const stripped = rel.replace(/\.(tsx?|jsx?|mjs|cjs)$/i, "");
+  for (const ext of EXTS) {
+    const k = stripped + ext;
+    const hit = suffix.get(k) ?? suffix.getInsensitive(k);
+    if (hit) return hit;
+  }
+  for (const ext of EXTS) {
+    const k = stripped + "/index" + ext;
+    const hit = suffix.get(k) ?? suffix.getInsensitive(k);
+    if (hit) return hit;
+  }
+  return null;
 }
 
 /** Extract a unified call graph from multiple source files */
@@ -42,6 +153,7 @@ export async function extractGraph(
   const exports: ExportsFact[] = [];
   const contains: ContainsFact[] = [];
   const fileNodes = new Map<string, FileNode>();
+  const allTypeInfo: FileTypeInfo[] = [];
 
   for (const { graph: p } of [...cached, ...fresh]) {
     defines.push(...p.defines);
@@ -50,9 +162,31 @@ export async function extractGraph(
     exports.push(...p.exports);
     contains.push(...p.contains);
     for (const fn of p.files ?? []) if (!fileNodes.has(fn.path)) fileNodes.set(fn.path, fn);
+    if (p._typeInfo) allTypeInfo.push(...p._typeInfo);
   }
 
-  return { defines, calls, imports, exports, contains, files: [...fileNodes.values()] };
+  const merged: CodeGraph = { defines, calls, imports, exports, contains, files: [...fileNodes.values()] };
+
+  // Project-wide qualified-name resolution. Runs only when at least one
+  // file produced type info (currently TS/JS). Mutates `calls` in place
+  // to fill `calleeQN` for resolved receiver chains.
+  if (allTypeInfo.length > 0) {
+    merged._typeInfo = allTypeInfo;
+    const registry = buildClassFieldRegistry(allTypeInfo);
+    resolveCallsWithRegistry(merged, registry);
+  }
+
+  // Import resolution: rewrite through tsconfig aliases and the suffix
+  // index to produce ImportsFact.resolved pointing at the canonical
+  // in-batch file path (repo-relative).
+  const repoPath = opts.repoPath ?? commonAncestor(files.map((f) => f.path));
+  const aliases = opts.repoPath ? loadTsconfigAliases(opts.repoPath) : EMPTY_TSCONFIG_ALIASES;
+  const suffix = files.length > 0
+    ? buildSuffixIndex(repoPath, "", files.map((f) => f.path))
+    : EMPTY_SUFFIX_INDEX;
+  resolveImportsInPlace(merged, repoPath, aliases, suffix);
+
+  return merged;
 }
 
 async function extractFileGraph(file: { path: string; content: string }): Promise<CodeGraph> {
@@ -79,17 +213,31 @@ async function extractFileGraph(file: { path: string; content: string }): Promis
     ?? await parseSourceAsync(file.content, file.path);
   if (!tree) return { defines, calls, imports, exports, contains, files };
 
+  let typeInfo: FileTypeInfo | undefined;
   try {
     const doc = extractFileDoc(tree.rootNode, lang);
     if (doc) fileNode.fileDoc = doc;
     extractFromTree(tree, file.path, lang, defines, calls, imports, exports, contains, callSet);
+    // Collect receiver-chain + class-field type info for TS/JS. Lets a
+    // later project-wide pass fill `calleeQN` on matching CallsFacts.
+    // Wrap in try/catch so an unexpected AST shape never sinks the main
+    // graph extraction — QN is best-effort, the rest of the graph isn't.
+    if (lang === "typescript" || lang === "tsx" || lang === "javascript") {
+      try {
+        typeInfo = collectTypeInfo(tree.rootNode, file.path);
+      } catch {
+        typeInfo = undefined;
+      }
+    }
   } finally {
     // web-tree-sitter (WASM) trees must be explicitly freed or WASM memory
     // grows monotonically. Native tree-sitter trees have no delete method
     // and are GC'd normally — guard with optional chaining.
     (tree as any).delete?.();
   }
-  return { defines, calls, imports, exports, contains, files };
+  const result: CodeGraph = { defines, calls, imports, exports, contains, files };
+  if (typeInfo) result._typeInfo = [typeInfo];
+  return result;
 }
 
 /**
@@ -1793,4 +1941,321 @@ function extractCljDefnArglist(listNode: any, nameSymIdx: number): string | unde
     }
   }
   return undefined;
+}
+
+// ── TS/JS type info collection for qualified call resolution ────────────────
+
+const FN_NODE_TYPES = new Set([
+  "function_declaration",
+  "method_definition",
+  "generator_function_declaration",
+  "arrow_function",
+  "function_expression",
+]);
+
+const CLASS_NODE_TYPES_SET = new Set([
+  "class_declaration",
+  "class",
+  "abstract_class_declaration",
+  "interface_declaration",
+]);
+
+function findEnclosingClassNameForTypeInfo(nodeIn: any): string | null {
+  let cur: any = nodeIn.parent;
+  while (cur) {
+    if (CLASS_NODE_TYPES_SET.has(cur.type)) {
+      const n = cur.childForFieldName?.("name");
+      if (n) return n.text;
+    }
+    cur = cur.parent;
+  }
+  return null;
+}
+
+function findEnclosingFnName(nodeIn: any): string | null {
+  let cur: any = nodeIn.parent;
+  while (cur) {
+    if (cur.type === "method_definition") {
+      const n = cur.childForFieldName?.("name");
+      if (n) return n.text;
+    }
+    if (
+      cur.type === "function_declaration" ||
+      cur.type === "generator_function_declaration"
+    ) {
+      const n = cur.childForFieldName?.("name");
+      if (n) return n.text;
+    }
+    if (cur.type === "arrow_function" || cur.type === "function_expression") {
+      // Named via `const name = () => {}` — walk to variable_declarator.
+      if (cur.parent?.type === "variable_declarator") {
+        const n = cur.parent.childForFieldName?.("name");
+        if (n?.type === "identifier") return n.text;
+      }
+    }
+    cur = cur.parent;
+  }
+  return null;
+}
+
+function scopeKeyOf(nodeIn: any): string {
+  let cur: any = nodeIn.parent;
+  while (cur) {
+    if (FN_NODE_TYPES.has(cur.type)) {
+      const n = cur.childForFieldName?.("name");
+      if (n) return n.text;
+      if (cur.parent?.type === "variable_declarator") {
+        const vn = cur.parent.childForFieldName?.("name");
+        if (vn?.type === "identifier") return vn.text;
+      }
+      return `__anon_${cur.startPosition.row}_${cur.startPosition.column}`;
+    }
+    cur = cur.parent;
+  }
+  return "";
+}
+
+function extractAnnotationTypeLocal(declNode: any): string | undefined {
+  const typeAnnNode = declNode.childForFieldName?.("type");
+  if (typeAnnNode) {
+    const innerType =
+      typeAnnNode.childForFieldName?.("type") ?? typeAnnNode.namedChild?.(0);
+    if (innerType) return simpleTypeNameOf(innerType);
+  }
+  for (let i = 0; i < declNode.childCount; i++) {
+    const c = declNode.child(i);
+    if (c && c.type === "type_annotation") {
+      const inner = c.namedChild?.(0);
+      if (inner) return simpleTypeNameOf(inner);
+    }
+  }
+  return undefined;
+}
+
+function extractNewTypeLocal(valueNode: any): string | undefined {
+  if (valueNode.type !== "new_expression") return undefined;
+  const ctor = valueNode.childForFieldName?.("constructor");
+  if (ctor) return simpleTypeNameOf(ctor);
+  const fc = valueNode.namedChild?.(0);
+  if (fc) return simpleTypeNameOf(fc);
+  return undefined;
+}
+
+// Thin wrapper: delegates to the shared, tested implementation in type-env.ts.
+// Keeps the call sites short without forcing callers to construct a node.
+const simpleTypeNameOf = extractSimpleTypeName;
+
+/**
+ * Build a dotted receiver chain from a member_expression callee.
+ * Returns `{ chain: [...], method }` where `chain` is the chain of
+ * identifiers preceding the final property access. Returns null when
+ * the chain contains anything non-trivial (computed access, call
+ * expressions, etc.) — qualified resolution needs a pure chain.
+ */
+function extractReceiverChain(memberExpr: any): { chain: string[]; method: string } | null {
+  const property = memberExpr.childForFieldName?.("property");
+  if (!property || property.type !== "property_identifier") return null;
+  const method = property.text;
+  if (!method) return null;
+
+  const chain: string[] = [];
+  let cur: any = memberExpr.childForFieldName?.("object");
+  while (cur) {
+    if (cur.type === "identifier") {
+      chain.unshift(cur.text);
+      break;
+    }
+    if (cur.type === "this") {
+      chain.unshift("this");
+      break;
+    }
+    if (cur.type === "member_expression") {
+      const p = cur.childForFieldName?.("property");
+      if (!p || p.type !== "property_identifier") return null;
+      chain.unshift(p.text);
+      cur = cur.childForFieldName?.("object");
+      continue;
+    }
+    // Anything else (call_expression, parenthesized, etc.) breaks the chain.
+    return null;
+  }
+  if (chain.length === 0) return null;
+  return { chain, method };
+}
+
+function firstIdentifierIn(node: any): string | null {
+  for (let i = 0; i < node.childCount; i++) {
+    const c = node.child(i);
+    if (!c) continue;
+    if (c.type === "identifier" || c.type === "type_identifier") return c.text;
+  }
+  return null;
+}
+
+function extractParentClassName(classNode: any): string | null {
+  // Two shapes to cover:
+  //   class:     class_declaration > class_heritage > extends_clause > identifier
+  //   interface: interface_declaration > extends_type_clause > type_identifier
+  for (let i = 0; i < classNode.childCount; i++) {
+    const child = classNode.child(i);
+    if (!child) continue;
+    // Interface: extends_type_clause directly on the declaration.
+    if (child.type === "extends_type_clause") {
+      const name = firstIdentifierIn(child);
+      if (name) return name;
+    }
+    // Class: extends_clause wrapped in class_heritage.
+    if (child.type === "class_heritage") {
+      for (let j = 0; j < child.childCount; j++) {
+        const inner = child.child(j);
+        if (!inner) continue;
+        if (
+          inner.type === "extends_clause" ||
+          inner.type === "extends_type_clause"
+        ) {
+          const name = firstIdentifierIn(inner);
+          if (name) return name;
+        }
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Collect method names defined directly on a class or interface body.
+ * Covers class `method_definition` and interface `method_signature`.
+ * Does NOT include inherited methods — the registry propagates extends.
+ */
+function extractClassMethods(classNode: any): string[] {
+  const body = classNode.childForFieldName?.("body");
+  if (!body) return [];
+  const out: string[] = [];
+  for (let i = 0; i < body.childCount; i++) {
+    const child = body.child(i);
+    if (!child) continue;
+    if (
+      child.type === "method_definition" ||
+      child.type === "method_signature" ||
+      child.type === "abstract_method_signature"
+    ) {
+      const nameNode = child.childForFieldName?.("name");
+      if (nameNode && nameNode.text) out.push(nameNode.text);
+    }
+  }
+  return out;
+}
+
+function collectTypeInfo(root: any, filePath: string): FileTypeInfo {
+  const classFieldsByName: Record<string, Record<string, string>> = {};
+  const classMethodsByName: Record<string, string[]> = {};
+  const classExtends: Array<{ className: string; parent: string }> = [];
+  const scopeVarTypes: Record<string, Record<string, string>> = {};
+
+  // Pass A: collect var types per scope (file scope is "").
+  function walkDecls(n: any): void {
+    if (
+      n.type === "lexical_declaration" ||
+      n.type === "variable_declaration"
+    ) {
+      for (let i = 0; i < n.childCount; i++) {
+        const child = n.child(i);
+        if (!child || child.type !== "variable_declarator") continue;
+        const nameNode = child.childForFieldName?.("name");
+        if (!nameNode || nameNode.type !== "identifier") continue;
+        const varName = nameNode.text;
+        if (!varName) continue;
+
+        const scope = scopeKeyOf(child);
+        let varType = extractAnnotationTypeLocal(child);
+        if (!varType) {
+          const v = child.childForFieldName?.("value");
+          if (v?.type === "new_expression") {
+            varType = extractNewTypeLocal(v);
+          } else if (v?.type === "identifier") {
+            const src = v.text;
+            const t =
+              scopeVarTypes[scope]?.[src] ?? scopeVarTypes[""]?.[src];
+            if (t) varType = t;
+          }
+        }
+        if (varType) {
+          if (!scopeVarTypes[scope]) scopeVarTypes[scope] = {};
+          scopeVarTypes[scope][varName] = varType;
+        }
+      }
+    }
+    for (let i = 0; i < n.childCount; i++) {
+      const c = n.child(i);
+      if (c) walkDecls(c);
+    }
+  }
+  walkDecls(root);
+
+  // Pass B: collect class fields + pending calls.
+  const pendingCalls: PendingCall[] = [];
+  function walkCallsAndClasses(n: any): void {
+    const t: string = n.type;
+    if (CLASS_NODE_TYPES_SET.has(t)) {
+      const nameNode = n.childForFieldName?.("name");
+      if (nameNode) {
+        const className: string = nameNode.text;
+        const fields = extractClassFields(n);
+        if (!classFieldsByName[className]) classFieldsByName[className] = {};
+        for (const [k, v] of fields) classFieldsByName[className][k] = v;
+        const methods = extractClassMethods(n);
+        if (methods.length > 0) {
+          const existing = classMethodsByName[className] ?? [];
+          for (const m of methods) if (!existing.includes(m)) existing.push(m);
+          classMethodsByName[className] = existing;
+        }
+        const parent = extractParentClassName(n);
+        if (parent) classExtends.push({ className, parent });
+      }
+    }
+    if (t === "call_expression") {
+      const fnNode = n.childForFieldName?.("function");
+      if (fnNode?.type === "member_expression") {
+        const parsed = extractReceiverChain(fnNode);
+        if (parsed) {
+          const { chain, method } = parsed;
+          const caller = findEnclosingFnName(n);
+          if (caller) {
+            const enclosingClass = findEnclosingClassNameForTypeInfo(n);
+            const scope = scopeKeyOf(n);
+            const fileScope = scopeVarTypes[""] ?? {};
+            const fnScope = scopeVarTypes[scope] ?? {};
+            const varTypes = { ...fileScope, ...fnScope };
+            pendingCalls.push({
+              caller,
+              callee: method,
+              receiverChain: chain,
+              enclosingClass,
+              varTypes,
+            });
+          }
+        }
+      }
+    }
+    for (let i = 0; i < n.childCount; i++) {
+      const c = n.child(i);
+      if (c) walkCallsAndClasses(c);
+    }
+  }
+  walkCallsAndClasses(root);
+
+  const methodsOut = Object.entries(classMethodsByName).map(([className, methods]) => ({
+    className,
+    methods,
+  }));
+  return {
+    file: filePath,
+    classFields: Object.entries(classFieldsByName).map(([className, fields]) => ({
+      className,
+      fields,
+    })),
+    classMethods: methodsOut.length > 0 ? methodsOut : undefined,
+    classExtends: classExtends.length > 0 ? classExtends : undefined,
+    pendingCalls,
+  };
 }

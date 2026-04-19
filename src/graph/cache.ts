@@ -21,10 +21,14 @@ import { join } from "node:path";
 import lockfile from "proper-lockfile";
 import type { CodeGraph } from "./types.js";
 
+// "3" introduced CodeGraph._typeInfo (per-file class fields + pending calls)
+// and CallsFact.calleeQN for qualified-name call resolution; "2" caches
+// would still work but produce no QN until files naturally re-extract, so
+// invalidate eagerly so the benefit is uniform across the repo.
 // "2" introduced FileNode.fileDoc/tokenEstimate/lineCount and
 // DefinesFact.signature; "1" caches lack these fields and would render as
 // partial maps until naturally invalidated by content change.
-export const CACHE_SCHEMA_VERSION = "2";
+export const CACHE_SCHEMA_VERSION = "3";
 
 const DEFAULT_MAX_BYTES_PER_REPO = 64 * 1024 * 1024; // 64 MB
 

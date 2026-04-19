@@ -112,11 +112,37 @@ export function graphToProlog(
   }
   if (graph.calls.length > 0) lines.push("");
 
+  // calls_qn(Caller, Callee, QN). — only for rows whose callee was resolved
+  // to a fully qualified name. Additive; `calls/2` remains the canonical view.
+  const qnRows = graph.calls.filter((c) => c.calleeQN);
+  if (qnRows.length > 0) {
+    lines.push(":- dynamic(calls_qn/3).");
+    for (const c of qnRows) {
+      lines.push(
+        `calls_qn(${escapeAtom(c.caller)}, ${escapeAtom(c.callee)}, ${escapeAtom(c.calleeQN!)}).`,
+      );
+    }
+    lines.push("");
+  }
+
   // imports(File, Name, Source).
   for (const i of graph.imports) {
     lines.push(`imports(${escapeAtom(i.file)}, ${escapeAtom(i.name)}, ${escapeAtom(i.source)}).`);
   }
   if (graph.imports.length > 0) lines.push("");
+
+  // imports_resolved(File, Name, ResolvedPath). — additive; only emitted
+  // for rows whose specifier resolved to a canonical in-batch file.
+  const resolvedRows = graph.imports.filter((i) => i.resolved);
+  if (resolvedRows.length > 0) {
+    lines.push(":- dynamic(imports_resolved/3).");
+    for (const i of resolvedRows) {
+      lines.push(
+        `imports_resolved(${escapeAtom(i.file)}, ${escapeAtom(i.name)}, ${escapeAtom(i.resolved!)}).`,
+      );
+    }
+    lines.push("");
+  }
 
   // exports(File, Name).
   for (const e of graph.exports) {
