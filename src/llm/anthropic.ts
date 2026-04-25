@@ -1,5 +1,6 @@
 import type { EmbeddingAdapter, LLMAdapter, LLMMessage } from "./types.js";
 import { OpenAICompatibleAdapter, OpenAICompatibleEmbeddingAdapter } from "./openai-compatible.js";
+import { AzureOpenAIEmbeddingAdapter } from "./azure-openai.js";
 
 const DEFAULT_MODEL = "claude-sonnet-4-6";
 const DEFAULT_URL = "https://api.anthropic.com/v1/messages";
@@ -113,18 +114,37 @@ export function createLLMFromEnv(): LLMAdapter | null {
  * Create an EmbeddingAdapter from environment variables, or null if not
  * configured. Anthropic has no embeddings API, so this checks OpenAI-
  * compatible providers only:
- *   OPENAI_API_KEY    → OpenAI
- *   DEEPSEEK_API_KEY  → DeepSeek (compatible)
+ *   AZURE_OPENAI_API_KEY (+ AZURE_OPENAI_API_ENDPOINT or AZURE_OPENAI_ENDPOINT)
+ *                      → Azure OpenAI
+ *   OPENAI_API_KEY     → OpenAI
+ *   DEEPSEEK_API_KEY   → DeepSeek (compatible)
  *   OPENROUTER_API_KEY → OpenRouter
  *
  * Override model with CHIASMUS_EMBED_MODEL, base URL with
  * CHIASMUS_EMBED_URL, and dimension with CHIASMUS_EMBED_DIM.
+ *
+ * For Azure, the deployment name comes from AZURE_OPENAI_EMBED_DEPLOYMENT
+ * (falling back to CHIASMUS_EMBED_MODEL); API version from
+ * AZURE_OPENAI_API_VERSION.
  */
 export function createEmbeddingFromEnv(): EmbeddingAdapter | null {
   const model = process.env.CHIASMUS_EMBED_MODEL ?? "text-embedding-3-small";
   const customUrl = process.env.CHIASMUS_EMBED_URL;
   const dimEnv = process.env.CHIASMUS_EMBED_DIM;
   const dimension = dimEnv ? Number.parseInt(dimEnv, 10) : undefined;
+
+  const azureKey = process.env.AZURE_OPENAI_API_KEY;
+  const azureEndpoint =
+    process.env.AZURE_OPENAI_API_ENDPOINT ?? process.env.AZURE_OPENAI_ENDPOINT;
+  if (azureKey && azureEndpoint) {
+    return new AzureOpenAIEmbeddingAdapter({
+      apiKey: azureKey,
+      endpoint: azureEndpoint,
+      deployment: process.env.AZURE_OPENAI_EMBED_DEPLOYMENT ?? model,
+      apiVersion: process.env.AZURE_OPENAI_API_VERSION,
+      dimension,
+    });
+  }
 
   const openaiKey = process.env.OPENAI_API_KEY;
   if (openaiKey) {
