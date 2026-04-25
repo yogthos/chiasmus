@@ -112,20 +112,23 @@ export function createLLMFromEnv(): LLMAdapter | null {
 
 /**
  * Create an EmbeddingAdapter from environment variables, or null if not
- * configured. Anthropic has no embeddings API, so this checks OpenAI-
- * compatible providers only:
- *   AZURE_OPENAI_API_KEY (+ AZURE_OPENAI_API_ENDPOINT or AZURE_OPENAI_ENDPOINT)
+ * configured. Anthropic has no embeddings API, so this checks third-party
+ * providers:
+ *   AZURE_OPENAI_API_KEY (+ AZURE_OPENAI_API_ENDPOINT or AZURE_OPENAI_ENDPOINT,
+ *                         + AZURE_OPENAI_EMBED_DEPLOYMENT)
  *                      → Azure OpenAI
  *   OPENAI_API_KEY     → OpenAI
- *   DEEPSEEK_API_KEY   → DeepSeek (compatible)
- *   OPENROUTER_API_KEY → OpenRouter
+ *   DEEPSEEK_API_KEY   → DeepSeek (OpenAI-compatible)
+ *   OPENROUTER_API_KEY → OpenRouter (OpenAI-compatible)
  *
  * Override model with CHIASMUS_EMBED_MODEL, base URL with
  * CHIASMUS_EMBED_URL, and dimension with CHIASMUS_EMBED_DIM.
  *
- * For Azure, the deployment name comes from AZURE_OPENAI_EMBED_DEPLOYMENT
- * (falling back to CHIASMUS_EMBED_MODEL); API version from
- * AZURE_OPENAI_API_VERSION.
+ * Azure ignores CHIASMUS_EMBED_URL — its URL is derived from
+ * AZURE_OPENAI_API_ENDPOINT plus the deployment name. The deployment name
+ * (a value chosen by the user at provisioning time, not a model name)
+ * must be supplied via AZURE_OPENAI_EMBED_DEPLOYMENT; there is no safe
+ * default. API version comes from AZURE_OPENAI_API_VERSION.
  */
 export function createEmbeddingFromEnv(): EmbeddingAdapter | null {
   const model = process.env.CHIASMUS_EMBED_MODEL ?? "text-embedding-3-small";
@@ -137,10 +140,17 @@ export function createEmbeddingFromEnv(): EmbeddingAdapter | null {
   const azureEndpoint =
     process.env.AZURE_OPENAI_API_ENDPOINT ?? process.env.AZURE_OPENAI_ENDPOINT;
   if (azureKey && azureEndpoint) {
+    const deployment = process.env.AZURE_OPENAI_EMBED_DEPLOYMENT;
+    if (!deployment) {
+      console.warn(
+        "[chiasmus] Azure OpenAI embedding configuration is incomplete: AZURE_OPENAI_API_KEY and AZURE_OPENAI_API_ENDPOINT are set, but AZURE_OPENAI_EMBED_DEPLOYMENT is missing. Azure routes by deployment name (chosen at provisioning), so there is no safe default. Embeddings will be unavailable until the deployment name is provided.",
+      );
+      return null;
+    }
     return new AzureOpenAIEmbeddingAdapter({
       apiKey: azureKey,
       endpoint: azureEndpoint,
-      deployment: process.env.AZURE_OPENAI_EMBED_DEPLOYMENT ?? model,
+      deployment,
       apiVersion: process.env.AZURE_OPENAI_API_VERSION,
       dimension,
     });
