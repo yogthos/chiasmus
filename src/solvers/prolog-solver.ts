@@ -15,23 +15,31 @@ const SAFE_PATH_RE = /^[/A-Za-z0-9_.-]+$/;
 // prolog-wasm-full has a single-init lifecycle (Emscripten factory
 // invalidates after first instantiation), so we lazily init exactly
 // one global instance shared across solver calls. Per-solve isolation
-// happens via temp-file consult + cleanup.
+// happens via virtual-FS consult + cleanup. The `/tmp/_chiasmus_*.pl`
+// paths look like host filesystem paths but live in Emscripten's
+// in-memory MEMFS — nothing touches the host disk.
 let plPromise: Promise<PrologFull> | null = null;
 let pathCounter = 0;
 
 async function getPl(): Promise<PrologFull> {
   plPromise ??= (async () => {
     const pl = await initProlog();
+    // The message-capture predicate and hook must be module-qualified to
+    // `user:`. SWI invokes message_hook from whichever module is emitting
+    // the message (often `system:` for low-level errors), and an unqualified
+    // assertz inside the hook body would resolve to the caller's module —
+    // failing silently with `Unknown procedure: system:$chiasmus_msg/2` and
+    // dropping the error on the floor.
     pl.consult(`
       :- use_module(library(lists)).
       :- use_module(library(clpfd)).
-      :- dynamic('$chiasmus_msg'/2).
+      :- dynamic(user:'$chiasmus_msg'/2).
       :- multifile(user:message_hook/3).
       user:message_hook(_Term, Kind, Lines) :-
           (Kind == error ; Kind == warning),
           with_output_to(string(S),
               print_message_lines(current_output, '', Lines)),
-          assertz('$chiasmus_msg'(Kind, S)),
+          assertz(user:'$chiasmus_msg'(Kind, S)),
           fail.
     `);
     return pl;
@@ -41,7 +49,7 @@ async function getPl(): Promise<PrologFull> {
 
 function clearMessages(pl: PrologFull): void {
   try {
-    pl.stock.call(`retractall('$chiasmus_msg'(_, _))`);
+    pl.stock.call(`retractall(user:'$chiasmus_msg'(_, _))`);
   } catch {
     /* best-effort */
   }
@@ -49,7 +57,7 @@ function clearMessages(pl: PrologFull): void {
 
 function collectErrorMessages(pl: PrologFull): string[] {
   try {
-    const rows = pl.query(`'$chiasmus_msg'(error, M)`).all();
+    const rows = pl.query(`user:'$chiasmus_msg'(error, M)`).all();
     return rows
       .map((r) => (r.M == null ? "" : String(r.M).trim()))
       .filter((s) => s.length > 0);
@@ -74,7 +82,7 @@ function validateQuery(pl: PrologFull, goal: string): string | null {
   const ok = pl.stock.call(
     `catch(read_term_from_atom('${atom}', _, []), Err, ` +
       `(with_output_to(string(EStr), write(Err)), ` +
-      `assertz('$chiasmus_msg'(error, EStr))))`,
+      `assertz(user:'$chiasmus_msg'(error, EStr))))`,
   );
   const errs = collectErrorMessages(pl);
   if (errs.length > 0) return errs.join("\n");
