@@ -23,7 +23,7 @@ describe("escapeAtom", () => {
   it("escapes backslashes so trailing backslash cannot terminate the quote", async () => {
     // A function name ending with a backslash must not corrupt the Prolog atom.
     const escaped = escapeAtom("foo\\");
-    // Must be parseable by Tau Prolog as a single atom.
+    // Must be parseable by SWI-Prolog as a single atom.
     const program = `defines('test.ts', ${escaped}, function, 1).`;
     const solver = createPrologSolver();
     const result = await solver.solve({

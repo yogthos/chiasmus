@@ -281,4 +281,137 @@ describe("PrologSolver", () => {
       expect(values).toContain("c");
     }
   });
+
+  describe("module isolation", () => {
+    it("isolates predicates across sequential solves", async () => {
+      // First solve defines color/1; second solve must not see it.
+      const s1 = createPrologSolver();
+      const r1 = await s1.solve({
+        type: "prolog",
+        program: "color(red). color(blue).",
+        query: "color(X).",
+      });
+      expect(r1.status).toBe("success");
+      s1.dispose();
+
+      const s2 = createPrologSolver();
+      const r2 = await s2.solve({
+        type: "prolog",
+        program: "",
+        query: "color(X).",
+      });
+      // Each solve runs in its own module, so color/1 from the previous
+      // solve is unreachable. The catch wrap converts existence_error
+      // into a structured error.
+      expect(r2.status).toBe("error");
+      if (r2.status === "error") {
+        expect(r2.error).toMatch(/existence_error|color/);
+      }
+      s2.dispose();
+    });
+
+    it("isolates concurrent solves with overlapping predicate names", async () => {
+      const a = createPrologSolver();
+      const b = createPrologSolver();
+      const [ra, rb] = await Promise.all([
+        a.solve({
+          type: "prolog",
+          program: "color(red). color(blue).",
+          query: "color(X).",
+        }),
+        b.solve({
+          type: "prolog",
+          program: "color(green). color(yellow).",
+          query: "color(X).",
+        }),
+      ]);
+      expect(ra.status).toBe("success");
+      expect(rb.status).toBe("success");
+      if (ra.status === "success" && rb.status === "success") {
+        const aXs = ra.answers.map((x) => x.bindings.X).sort();
+        const bXs = rb.answers.map((x) => x.bindings.X).sort();
+        expect(aXs).toEqual(["blue", "red"]);
+        expect(bXs).toEqual(["green", "yellow"]);
+      }
+      a.dispose();
+      b.dispose();
+    });
+
+    it("imports library(lists) into the session module", async () => {
+      // member/2 lives in library(lists); the session module imports it.
+      solver = createPrologSolver();
+      const result = await solver.solve({
+        type: "prolog",
+        program: "colors([red, green, blue]).",
+        query: "colors(L), member(X, L).",
+      });
+      expect(result.status).toBe("success");
+      if (result.status === "success") {
+        const xs = result.answers.map((a) => a.bindings.X);
+        expect(xs).toEqual(["red", "green", "blue"]);
+      }
+    });
+
+    it("imports library(clpfd) into the session module", async () => {
+      solver = createPrologSolver();
+      const result = await solver.solve({
+        type: "prolog",
+        program:
+          "schedule(X, Y) :- [X, Y] ins 1..5, X + Y #= 7, X #< Y, label([X, Y]).",
+        query: "schedule(X, Y).",
+      });
+      expect(result.status).toBe("success");
+      if (result.status === "success") {
+        expect(result.answers.length).toBeGreaterThan(0);
+      }
+    });
+  });
+
+  describe("undefined predicate in query", () => {
+    it("surfaces an existence_error rather than silently returning empty", async () => {
+      solver = createPrologSolver();
+      const result = await solver.solve({
+        type: "prolog",
+        program: "",
+        query: "totally_undefined(X).",
+      });
+      expect(result.status).toBe("error");
+      if (result.status === "error") {
+        expect(result.error).toMatch(/existence_error|totally_undefined/);
+      }
+    });
+
+    it("surfaces existence_error from a defined goal that calls an undefined helper", async () => {
+      solver = createPrologSolver();
+      const result = await solver.solve({
+        type: "prolog",
+        program: "outer(X) :- inner(X).",
+        query: "outer(X).",
+      });
+      expect(result.status).toBe("error");
+      if (result.status === "error") {
+        expect(result.error).toMatch(/existence_error|inner/);
+      }
+    });
+  });
+
+  describe("instrumentation", () => {
+    it("does not duplicate the final clause when input has no trailing whitespace", async () => {
+      // Regression: the trailing-fragment branch fired even when the inner
+      // loop had already emitted a rewritten clause flush against EOF,
+      // resulting in `q/1` having two clauses (instrumented + raw) and
+      // doubling the answer count.
+      solver = createPrologSolver();
+      const result = await solver.solve({
+        type: "prolog",
+        program: "p(a). p(b). q(X) :- p(X).",
+        query: "q(X).",
+        explain: true,
+      });
+      expect(result.status).toBe("success");
+      if (result.status === "success") {
+        expect(result.answers.map((a) => a.bindings.X)).toEqual(["a", "b"]);
+      }
+    });
+  });
 });

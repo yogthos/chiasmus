@@ -66,7 +66,7 @@ Z3 RULES:
 
 PROLOG RULES:
   ⚠ All clauses end with period
-  ⚠ No recursive reachability on cyclic graphs — Tau Prolog lacks tabling → infinite loop. Query edges individually, BFS externally.
+  ⚠ No recursive reachability on cyclic graphs without tabling → infinite loop. Add ":- table reach/2." (SWI tabling), or query edges individually and BFS externally.
   ⚠ Use "queries" param (JSON array) to batch multiple queries against same program in one call
 
 Z3 EXAMPLE (RBAC conflict):
