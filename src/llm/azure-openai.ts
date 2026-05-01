@@ -37,7 +37,13 @@ export class AzureOpenAIEmbeddingAdapter implements EmbeddingAdapter {
     const endpoint = config.endpoint.replace(/\/+$/, "");
     const apiVersion = config.apiVersion ?? DEFAULT_API_VERSION;
     this.apiKey = config.apiKey;
-    this.url = `${endpoint}/openai/deployments/${config.deployment}/embeddings?api-version=${apiVersion}`;
+    // Azure deployment names today are restricted to alphanumerics, dashes,
+    // and underscores, but encodeURIComponent costs nothing and prevents
+    // the URL from breaking if those rules ever loosen or if a stray space
+    // sneaks in via env config. apiVersion gets the same treatment.
+    const deployment = encodeURIComponent(config.deployment);
+    const versionParam = encodeURIComponent(apiVersion);
+    this.url = `${endpoint}/openai/deployments/${deployment}/embeddings?api-version=${versionParam}`;
     this.dim = config.dimension ?? null;
     this.batchSize = config.batchSize ?? 16;
   }
