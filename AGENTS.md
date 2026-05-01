@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Chiasmus is an MCP (Model Context Protocol) server that gives LLMs access to formal verification via **Z3** (SMT solver) and **Tau Prolog**. It also provides tree-sitter-based source code call graph analysis. The server translates natural language problems into formal logic using a template-based pipeline, verifies results with mathematical certainty, and analyzes call graphs for reachability, dead code, and impact analysis.
+Chiasmus is an MCP (Model Context Protocol) server that gives LLMs access to formal verification via **Z3** (SMT solver) and **SWI-Prolog** (via `prolog-wasm-full`, including `library(clpfd)`). It also provides tree-sitter-based source code call graph analysis. The server translates natural language problems into formal logic using a template-based pipeline, verifies results with mathematical certainty, and analyzes call graphs for reachability, dead code, and impact analysis.
 
 - **Language**: TypeScript (strict mode, ESM)
 - **Runtime**: Node.js ≥20
@@ -39,7 +39,7 @@ src/
 │   ├── types.ts           # SolverType, SolverResult (discriminated union), Solver, SolverInput
 │   ├── session.ts         # SolverSession — factory for Z3/Prolog solver instances
 │   ├── z3-solver.ts       # Z3 WASM wrapper (z3-solver npm), auto-strips check-sat/get-model
-│   ├── prolog-solver.ts   # Tau Prolog wrapper, derivation tracing via assertz
+│   ├── prolog-solver.ts   # SWI-Prolog (prolog-wasm-full) wrapper, derivation tracing via assertz
 │   └── correction-loop.ts # Bounded repair loop (delegates to repl-sandbox)
 ├── formalize/
 │   ├── engine.ts          # FormalizationEngine — template selection, LLM slot-filling, solve pipeline
@@ -314,10 +314,11 @@ Matching `CallsFact`s get their `calleeQN = "Class.method"`. Emitted as `calls_q
 - Empty input after sanitization returns `{ status: "sat", model: {} }`
 
 ### Prolog Solver
-- Tau Prolog is callback-based — wrapped in promises (`consult`, `query`, `nextAnswer`)
-- Max 1000 answers per query, max 100,000 inferences
-- **No recursive reachability on cyclic graphs** — Tau Prolog lacks tabling → infinite loop. Query edges individually, BFS externally.
+- Backed by `prolog-wasm-full` (SWI-Prolog 10.1.4 in WebAssembly, includes `library(clpfd)`)
+- Single global SWI instance (Emscripten factory invalidates after first instantiation); per-`solve()` isolation via temp-file consult + `abolish/1` cleanup
+- Max 1000 answers per query, default 100,000 inference budget (`maxInferences` overrides; goal wrapped in `call_with_inference_limit/3`)
 - Derivation tracing instruments rules by injecting `assertz(trace_goal(head))` into each rule body
+- Errors during consult are captured via a `user:message_hook/3` that asserts to `'$chiasmus_msg'/2`; query syntax errors are pre-validated via `read_term_from_atom/3` (the stock query API doesn't propagate parse errors)
 - Prolog clauses must end with periods
 
 ### General
@@ -327,7 +328,6 @@ Matching `CallsFact`s get their `calleeQN = "Class.method"`. Emitted as `calls_q
 - `chiasmus_solve` falls back to `chiasmus_formalize` when no API key is set
 - Test imports use `../src/solvers/z3-solver.js` (not `../../dist/...`)
 - Template slots use `{{SLOT:name}}` markers in skeleton strings
-- The `as any` casts on Tau Prolog session objects are intentional — the library's TypeScript types are incomplete
 - Lint tool (`formalize/validate.ts`) auto-fixes markdown fences, `(check-sat)`, `(get-model)`, `(set-logic)` before reporting errors
 
 ### Graph cache

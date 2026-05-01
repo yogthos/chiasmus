@@ -10,9 +10,9 @@ import type { CodeGraph, DefinesFact, CallsFact } from "../../src/graph/types.js
  * Scale tests for graph analyses.
  *
  * The Prolog-based implementation of cycles/impact/reachability/path/dead-code
- * times out on realistic codebases (a few hundred functions) because Tau Prolog
- * lacks tabling and `func_reaches(X, X)` enumerates the full reachability graph
- * from every X. These tests lock in the native-algorithm replacement by
+ * times out on realistic codebases (a few hundred functions) because the
+ * emitted rules don't use tabling and `func_reaches(X, X)` enumerates the
+ * full reachability graph from every X. These tests lock in the native-algorithm replacement by
  * asserting each analysis completes within a tight wall-clock budget on graphs
  * large enough to expose the old blow-up.
  */

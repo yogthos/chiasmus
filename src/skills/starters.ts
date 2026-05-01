@@ -371,7 +371,7 @@ export const STARTER_TEMPLATES: SkillTemplate[] = [
     ],
     tips: [
       "All clauses end with period. Lowercase = atoms, Uppercase = variables.",
-      "No recursive rules on cyclic data — Tau Prolog lacks tabling → infinite loop.",
+      "No recursive rules on cyclic data without tabling → infinite loop. Add `:- table reach/2.` if needed.",
     ],
   },
 
@@ -836,7 +836,7 @@ missing_pair(Func, Expected) :-
       "For CALLER → CALLEE propagation, reverse the calls/2 direction in the rule",
       "Multiple labels: duplicate the skeleton for each label with a different predicate name",
       "Add negation to find gaps: unlabeled_but_should_be(Func) :- calls_failing(Func), \\+ has_error_handler(Func).",
-      "Keep call graph acyclic in propagation rules or add depth limits — Tau Prolog has no tabling",
+      "Keep call graph acyclic in propagation rules, add depth limits, or table the recursive predicate (`:- table prop/1.`)",
     ],
     example: `calls(handle_request, db_query).
 calls(handle_request, validate).
@@ -918,7 +918,7 @@ violation(Sink) :- tainted(Sink), sink(Sink).`,
       "sanitize(X) stops propagation: nodes AFTER a sanitizer are NOT tainted",
       "Query tainted(X) to see all tainted nodes, violation(X) to see actual security issues",
       "For multi-path analysis: a node is tainted if ANY incoming path is unsanitized",
-      "Keep flow graph acyclic or add visited-list tracking — Tau Prolog has no tabling",
+      "Keep flow graph acyclic, add visited-list tracking, or table the recursive predicate (`:- table tainted/1.`)",
     ],
     example: `flows(user_input, parse).
 flows(parse, validate).

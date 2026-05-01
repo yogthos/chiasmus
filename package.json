@@ -2,7 +2,7 @@
   "name": "chiasmus",
   "version": "0.1.17",
   "type": "module",
-  "description": "Neurosymbolic verification engine - MCP server for formal reasoning with Z3 and Tau Prolog",
+  "description": "Neurosymbolic verification engine - MCP server for formal reasoning with Z3 and SWI-Prolog (WASM)",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
@@ -83,7 +83,7 @@
     "graphology-metrics": "^2.4.0",
     "proper-lockfile": "^4.1.2",
     "repl-sandbox": "^0.1.1",
-    "tau-prolog": "^0.3.4",
+    "prolog-wasm-full": "^0.2.0",
     "tree-sitter": "^0.22.4",
     "tree-sitter-go": "^0.23.2",
     "tree-sitter-javascript": "^0.23.1",

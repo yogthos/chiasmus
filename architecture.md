@@ -172,7 +172,7 @@ New normalization patterns discovered during use get saved back to the template,
 
 **Z3** via `z3-solver` npm package. WebAssembly build of Microsoft's SMT solver, runs entirely in Node. Handles satisfiability modulo theories — the LLM outputs SMT-LIB format or constructs JS API calls. Covers: integer/real arithmetic, bitvectors, arrays, datatypes, quantifiers.
 
-**Tau Prolog** — pure JavaScript ISO Prolog interpreter. The LLM outputs Prolog facts and rules as a string, loaded into a fresh session. Covers: rule-based deduction, backtracking search, recursive queries, unification. Token-efficient syntax that LLMs generate accurately.
+**SWI-Prolog** via `prolog-wasm-full` npm package. SWI-Prolog 10.1.4 in WebAssembly with `library(clpfd)` included. The LLM outputs Prolog facts and rules as a string, consulted into a temp file and queried with `call_with_inference_limit/3` for runaway protection. Covers: rule-based deduction, backtracking search, recursive queries, unification, finite-domain constraints. Token-efficient syntax that LLMs generate accurately.
 
 Both run entirely within the host process. No external API calls. Isolated, stateful contexts spin up instantly.
 
@@ -236,19 +236,19 @@ Each phase follows strict TDD: write tests first, verify they fail, implement, v
 
 ### Phase 1: Solver Sandbox
 
-**Goal:** Get Z3 and Tau Prolog running in isolated, stateful contexts with clean input/output interfaces.
+**Goal:** Get Z3 and SWI-Prolog running in isolated, stateful contexts with clean input/output interfaces.
 
 **Delivers:**
 - `chiasmus_verify` MCP tool — submit raw SMT-LIB or Prolog, get result
-- Solver abstraction layer (common interface over Z3 and Tau Prolog)
+- Solver abstraction layer (common interface over Z3 and SWI-Prolog)
 - Error capture and structured error reporting
 - Session isolation (concurrent solver contexts)
 
 **Tests:**
 - Z3: submit valid SMT-LIB, get SAT/UNSAT + model
 - Z3: submit invalid SMT-LIB, get structured error
-- Tau Prolog: load facts + rules, query, get derivation
-- Tau Prolog: submit malformed program, get structured error
+- SWI-Prolog: load facts + rules, query, get derivation
+- SWI-Prolog: submit malformed program, get structured error
 - Concurrent sessions don't interfere with each other
 
 **Review + Dogfood:** Can I (the LLM) submit formal specs directly and get useful verified results? Is the error reporting clear enough to self-correct?

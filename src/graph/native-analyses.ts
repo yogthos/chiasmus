@@ -1,10 +1,11 @@
 /**
  * Native graph analyses — O(V+E) implementations that run directly on a
- * CodeGraph without going through Tau Prolog. These exist because Prolog
- * (no tabling, linear-scan method filter) times out on mid-size codebases
- * for the reachability-heavy analyses (cycles, impact, reachability, path,
- * dead-code). The Prolog rule set is still emitted by graphToProlog so the
- * `facts` output remains usable with chiasmus_verify.
+ * CodeGraph without going through Prolog. These exist because the
+ * Prolog rule set we emit (no tabling, linear-scan method filter) times
+ * out on mid-size codebases for the reachability-heavy analyses (cycles,
+ * impact, reachability, path, dead-code). The Prolog rule set is still
+ * emitted by graphToProlog so the `facts` output remains usable with
+ * chiasmus_verify.
  */
 
 import type { CodeGraph } from "./types.js";
