@@ -6,8 +6,8 @@ export type SolverResult =
   | { status: "sat"; model: Record<string, string> }
   | { status: "unsat"; unsatCore?: string[] }
   | { status: "unknown" }
-  | { status: "success"; answers: PrologAnswer[]; trace?: string[] }
-  | { status: "error"; error: string };
+  | { status: "success"; answers: PrologAnswer[]; trace?: string[]; warnings?: string[] }
+  | { status: "error"; error: string; warnings?: string[] };
 
 /** A single Prolog query answer: variable bindings */
 export interface PrologAnswer {
