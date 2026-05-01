@@ -129,6 +129,51 @@ describe("AzureOpenAIEmbeddingAdapter", () => {
     expect(secondBody.input).toHaveLength(4);
   });
 
+  it("preserves input → output position across batch boundaries", async () => {
+    // The per-batch API responses use per-batch indices (0..15, then 0..3),
+    // so naive concatenation would scramble nothing — but a regression that
+    // (e.g.) returned the second batch first would. Tag each embedding with
+    // a value derived from the input string so positional drift is visible.
+    fetchMock.mockImplementation(async (_url, init) => {
+      const body = JSON.parse((init as RequestInit).body as string) as { input: string[] };
+      const data = body.input.map((text, index) => ({
+        index,
+        // Embed `t7` as [7], `t19` as [19], etc. — single-element vector
+        // whose value identifies the input.
+        embedding: [Number(text.slice(1))],
+      }));
+      return new Response(JSON.stringify({ data }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+
+    const adapter = new AzureOpenAIEmbeddingAdapter({
+      apiKey: "k",
+      endpoint: "https://r.openai.azure.com",
+      deployment: "d",
+    });
+    const inputs = Array.from({ length: 20 }, (_, i) => `t${i}`);
+    const vecs = await adapter.embed(inputs);
+    expect(vecs.map((v) => v[0])).toEqual(inputs.map((_, i) => i));
+  });
+
+  it("URL-encodes the deployment name and api-version", async () => {
+    const adapter = new AzureOpenAIEmbeddingAdapter({
+      apiKey: "k",
+      endpoint: "https://r.openai.azure.com",
+      // Spaces and a slash would corrupt the URL if interpolated raw.
+      deployment: "weird name/v2",
+      apiVersion: "2024-02 preview",
+    });
+    await adapter.embed(["hello"]);
+
+    const [url] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(
+      "https://r.openai.azure.com/openai/deployments/weird%20name%2Fv2/embeddings?api-version=2024-02%20preview",
+    );
+  });
+
   it("returns embeddings in input order even when the API responds out of order", async () => {
     fetchMock.mockImplementation(async () =>
       new Response(
