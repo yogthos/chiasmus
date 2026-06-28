@@ -214,6 +214,38 @@ chiasmus_search query="refresh OAuth tokens" files=["src/**/*.ts"] top_k=5
 
 Opt-in: needs an embedding provider via env (`OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, or `OPENROUTER_API_KEY`). Override the model with `CHIASMUS_EMBED_MODEL` (default `text-embedding-3-small`), base URL with `CHIASMUS_EMBED_URL`, and dimension with `CHIASMUS_EMBED_DIM`. Embeddings are cached by content SHA-256 under `$CHIASMUS_HOME/embeddings` — unchanged code is not re-embedded.
 
+### Local embeddings (no API key)
+
+`chiasmus_search` and `chiasmus_formalize` can run embeddings entirely on-device via [node-llama-cpp](https://github.com/withcatai/node-llama-cpp) — e.g. `Qwen3-Embedding-0.6B`. The model is downloaded from HuggingFace on first use and cached under `$CHIASMUS_HOME/models`.
+
+First install the runtime dependency (it is intentionally not bundled with chiasmus, to keep the base install lean):
+
+```bash
+npm install node-llama-cpp   # or: pnpm add node-llama-cpp
+```
+
+Then opt in. Either set `localEmbeddings` in `~/.chiasmus/config.json`:
+
+```json
+{
+  "localEmbeddings": {
+    "enabled": true,
+    "model": "hf:Qwen/Qwen3-Embedding-0.6B-GGUF",
+    "dimension": 1024
+  }
+}
+```
+
+…or use env vars:
+
+```bash
+export CHIASMUS_LOCAL_EMBED=1
+export CHIASMUS_LOCAL_EMBED_MODEL=hf:Qwen/Qwen3-Embedding-0.6B-GGUF
+export CHIASMUS_LOCAL_EMBED_DIM=1024        # optional; else discovered on first embed
+```
+
+When enabled, local takes priority over cloud embedding providers. `model` accepts an `hf:` repo URI, a bare Hugging Face repo id (`org/repo`), a local `.gguf` path, or an `http(s)` URL. Env vars override the config block per field; `CHIASMUS_LOCAL_EMBED_DIR` overrides the download directory (default `$CHIASMUS_HOME/models`) and `CHIASMUS_LOCAL_EMBED_BATCH` the texts-per-call batch size (default 32).
+
 **`chiasmus_learn`** — Extract a reusable template from a verified solution. Candidates get promoted after 3+ successful reuses.
 
 **`chiasmus_lint`** — Fast structural validation of specs without running the solver.

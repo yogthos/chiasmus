@@ -51,4 +51,61 @@ describe("loadConfig", () => {
       rmSync(dir, { recursive: true });
     }
   });
+
+  describe("localEmbeddings", () => {
+    it("is undefined by default", () => {
+      const config = loadConfig("/nonexistent/path");
+      expect(config.localEmbeddings).toBeUndefined();
+    });
+
+    it("reads a complete localEmbeddings block", () => {
+      const dir = makeTmpDir();
+      try {
+        writeFileSync(join(dir, "config.json"), JSON.stringify({
+          localEmbeddings: {
+            enabled: true,
+            model: "hf:Qwen/Qwen3-Embedding-0.6B-GGUF",
+            dimension: 1024,
+            modelsDir: "/tmp/models",
+          },
+        }));
+        const config = loadConfig(dir);
+        expect(config.localEmbeddings).toEqual({
+          enabled: true,
+          model: "hf:Qwen/Qwen3-Embedding-0.6B-GGUF",
+          dimension: 1024,
+          modelsDir: "/tmp/models",
+        });
+      } finally {
+        rmSync(dir, { recursive: true });
+      }
+    });
+
+    it("normalizes enabled to a boolean and drops non-string model", () => {
+      const dir = makeTmpDir();
+      try {
+        writeFileSync(join(dir, "config.json"), JSON.stringify({
+          localEmbeddings: { enabled: "yes", model: 123 },
+        }));
+        const config = loadConfig(dir);
+        expect(config.localEmbeddings?.enabled).toBe(false); // "yes" is not boolean
+        expect(config.localEmbeddings?.model).toBeUndefined();
+      } finally {
+        rmSync(dir, { recursive: true });
+      }
+    });
+
+    it("ignores a non-object localEmbeddings value", () => {
+      const dir = makeTmpDir();
+      try {
+        writeFileSync(join(dir, "config.json"), JSON.stringify({
+          localEmbeddings: "true",
+        }));
+        const config = loadConfig(dir);
+        expect(config.localEmbeddings).toBeUndefined();
+      } finally {
+        rmSync(dir, { recursive: true });
+      }
+    });
+  });
 });
