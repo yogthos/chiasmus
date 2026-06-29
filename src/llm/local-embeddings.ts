@@ -228,5 +228,5 @@ export async function defaultLoadModel(cfg: {
 function resolveModelUri(model: string): string {
   if (/^(hf:|https?:|file:)/i.test(model)) return model;
   if (existsSync(model)) return model;
-  return model.startsWith("hf:") ? model : `hf:${model}`;
+  return `hf:${model}`;
 }
