@@ -175,10 +175,10 @@ interface NodeLlamaCpp {
 }
 
 /**
- * Production loader: dynamically imports node-llama-cpp (kept out of the hard
- * dependency graph so the base install stays lean and the feature is opt-in),
- * resolves/downloads the GGUF model from HuggingFace, and returns an embedding
- * session. Throws with an install hint if the package is missing.
+ * Production loader: dynamically imports node-llama-cpp (an optionalDependency
+ * of chiasmus), resolves/downloads the GGUF model from HuggingFace, and returns an
+ * embedding session. Throws with an install hint if the package is missing
+ * (e.g. an install where the optional dependency fetch failed).
  */
 export async function defaultLoadModel(cfg: {
   model: string;
@@ -192,8 +192,9 @@ export async function defaultLoadModel(cfg: {
     nlc = (await import(moduleName)) as NodeLlamaCpp;
   } catch {
     throw new Error(
-      "Local embeddings are enabled but `node-llama-cpp` could not be loaded. " +
-        "Install it alongside chiasmus: `npm install node-llama-cpp` " +
+      "Local embeddings are enabled but `node-llama-cpp` could not be loaded " +
+        "(it is an optionalDependency that may have been skipped on this platform). " +
+        "Install it manually: `npm install node-llama-cpp` " +
         "(or `pnpm add node-llama-cpp` / `yarn add node-llama-cpp`).",
     );
   }

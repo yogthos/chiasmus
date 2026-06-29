@@ -1,8 +1,8 @@
+import { readFileSync } from "node:fs";
 import { describe, it, expect, vi } from "vitest";
 import {
   LocalEmbeddingAdapter,
   resolveLocalEmbeddingConfig,
-  defaultLoadModel,
   type EmbeddingSession,
 } from "../src/llm/local-embeddings.js";
 import type { ChiasmusConfig } from "../src/config.js";
@@ -201,8 +201,10 @@ describe("resolveLocalEmbeddingConfig", () => {
   });
 });
 
-describe("defaultLoadModel", () => {
-  it("throws a clear install hint when node-llama-cpp is not available", async () => {
-    await expect(defaultLoadModel({ model: "hf:foo/bar" })).rejects.toThrow(/node-llama-cpp/);
+describe("node-llama-cpp packaging", () => {
+  it("is declared as an optionalDependency so it resolves on global + npx installs", () => {
+    const pkgPath = new URL("../package.json", import.meta.url);
+    const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
+    expect(pkg.optionalDependencies?.["node-llama-cpp"]).toBeTruthy();
   });
 });

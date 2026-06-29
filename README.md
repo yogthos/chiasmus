@@ -216,9 +216,9 @@ Opt-in: needs an embedding provider via env (`OPENAI_API_KEY`, `DEEPSEEK_API_KEY
 
 ### Local embeddings (no API key)
 
-`chiasmus_search` and `chiasmus_formalize` can run embeddings entirely on-device via [node-llama-cpp](https://github.com/withcatai/node-llama-cpp) — e.g. `Qwen3-Embedding-0.6B`. The model is downloaded from HuggingFace on first use and cached under `$CHIASMUS_HOME/models`.
+`chiasmus_search` and `chiasmus_formalize` can run embeddings entirely on-device via [node-llama-cpp](https://github.com/withcatai/node-llama-cpp) — e.g. `Qwen3-Embedding-0.6B`. `node-llama-cpp` ships as an `optionalDependency`, so it is installed automatically alongside chiasmus (via `npm`, `pnpm`, or `npx`). The GGUF model is downloaded from HuggingFace on first use and cached under `$CHIASMUS_HOME/models`.
 
-First install the runtime dependency (it is intentionally not bundled with chiasmus, to keep the base install lean):
+If the optional install was skipped (e.g. an unsupported platform where the fetch failed), install it manually:
 
 ```bash
 npm install node-llama-cpp   # or: pnpm add node-llama-cpp

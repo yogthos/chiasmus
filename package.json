@@ -93,6 +93,9 @@
     "web-tree-sitter": "^0.26.8",
     "z3-solver": "^4.16.0"
   },
+  "optionalDependencies": {
+    "node-llama-cpp": "^3.18.1"
+  },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.0.0",
