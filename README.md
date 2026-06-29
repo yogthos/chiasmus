@@ -464,7 +464,7 @@ library.close();
 | `chiasmus/graph` | `extractGraph`, `runAnalysis`, `runAnalysisFromGraph`, `buildFactsResult`, `graphToProlog`, `parseMermaid`, `detectCommunities`, `detectHubs`, `detectBridges`, `detectSurprisingConnections`, `detectEntryPoints`, `graphDiff`, `saveSnapshot`/`loadSnapshot`/`listSnapshots`, cache APIs, adapter registry, graph types |
 | `chiasmus/formalize` | `lintSpec`, `classifyFeedback`, `extractPrologQuery`, `FormalizationEngine`, result types |
 | `chiasmus/skills` | `SkillLibrary`, `SkillLearner`, `craftTemplate`, `validateTemplate`, skill types |
-| `chiasmus/llm` | `createLLMFromEnv`, `AnthropicAdapter`, `OpenAICompatibleAdapter`, LLM types |
+| `chiasmus/llm` | `createLLMFromEnv`, `createEmbeddingFromEnv`, `AnthropicAdapter`, `OpenAICompatibleAdapter`, `OpenAICompatibleEmbeddingAdapter`, `LocalEmbeddingAdapter`, `resolveLocalEmbeddingConfig`, LLM types |
 | `chiasmus/mcp` | `createChiasmusServer`, `getChiasmusHome` |
 
 ## Configuration
@@ -479,14 +479,25 @@ library.close();
 | `OPENAI_API_KEY` | — | Optional: OpenAI provider for autonomous mode |
 | `CHIASMUS_API_URL` | per provider | Override API base URL (e.g. for local models via Ollama) |
 | `CHIASMUS_MODEL` | per provider | Override model name |
+| `CHIASMUS_EMBED_MODEL` | `text-embedding-3-small` | Embedding model name (cloud providers) |
+| `CHIASMUS_EMBED_URL` | per provider | Embedding API base URL |
+| `CHIASMUS_EMBED_DIM` | discovered | Embedding dimension (else learned on first call; local skips the first-call cache miss) |
+| `CHIASMUS_LOCAL_EMBED` | — | Opt in to on-device embeddings (`1`/`true`/`yes`/`on`). See [Local embeddings](#local-embeddings-no-api-key) |
+| `CHIASMUS_LOCAL_EMBED_MODEL` | — | Model id (`hf:org/repo`, bare repo id, local `.gguf`, or URL) |
+| `CHIASMUS_LOCAL_EMBED_DIM` | discovered | Fixed embedding dimension (else discovered on first call) |
+| `CHIASMUS_LOCAL_EMBED_DIR` | `$CHIASMUS_HOME/models` | Where downloaded models are cached |
+| `CHIASMUS_LOCAL_EMBED_BATCH` | `32` | Texts per embedding backend call |
 
 Providers are checked in order: Anthropic → DeepSeek → OpenAI. Only one key is needed for autonomous mode (`chiasmus_solve`, `chiasmus_learn`). When used from Claude Code, Crush, or OpenCode, no API key is needed — the calling LLM handles template filling directly.
+
+Embedding provider selection (first match wins): local embeddings (when `CHIASMUS_LOCAL_EMBED` is set and a model is configured) → Azure OpenAI → OpenAI → DeepSeek → OpenRouter. When enabled without a model, a warning is logged and cloud providers are used instead.
 
 ### `~/.chiasmus/config.json`
 
 | Key | Default | Purpose |
 |-----|---------|---------|
 | `adapterDiscovery` | `false` | Scan `node_modules` for `chiasmus-adapter-*` packages at startup |
+| `localEmbeddings` | — | Opt in to on-device embeddings via node-llama-cpp. Object with `enabled`, `model`, `dimension`, `modelsDir`. See [Local embeddings](#local-embeddings-no-api-key) |
 
 ## License
 
