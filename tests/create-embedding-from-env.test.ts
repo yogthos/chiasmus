@@ -2,6 +2,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createEmbeddingFromEnv } from "../src/llm/anthropic.js";
 import { AzureOpenAIEmbeddingAdapter } from "../src/llm/azure-openai.js";
 import { OpenAICompatibleEmbeddingAdapter } from "../src/llm/openai-compatible.js";
+import { LocalEmbeddingAdapter } from "../src/llm/local-embeddings.js";
+import type { ChiasmusConfig } from "../src/config.js";
 
 // Env vars the factory consults. Cleared in beforeEach so each test
 // starts from a known-empty state — node may have any of these set in
@@ -18,6 +20,11 @@ const RELEVANT_VARS = [
   "CHIASMUS_EMBED_MODEL",
   "CHIASMUS_EMBED_URL",
   "CHIASMUS_EMBED_DIM",
+  "CHIASMUS_LOCAL_EMBED",
+  "CHIASMUS_LOCAL_EMBED_MODEL",
+  "CHIASMUS_LOCAL_EMBED_DIM",
+  "CHIASMUS_LOCAL_EMBED_DIR",
+  "CHIASMUS_LOCAL_EMBED_BATCH",
 ] as const;
 
 describe("createEmbeddingFromEnv", () => {
@@ -177,6 +184,63 @@ describe("createEmbeddingFromEnv", () => {
 
       const adapter = createEmbeddingFromEnv();
       expect(adapter).toBeInstanceOf(OpenAICompatibleEmbeddingAdapter);
+    });
+  });
+
+  describe("local embeddings (node-llama-cpp)", () => {
+    it("selects LocalEmbeddingAdapter when enabled + model via env, threading dimension", () => {
+      process.env.CHIASMUS_LOCAL_EMBED = "1";
+      process.env.CHIASMUS_LOCAL_EMBED_MODEL = "hf:Qwen/Qwen3-Embedding-0.6B-GGUF";
+      process.env.CHIASMUS_LOCAL_EMBED_DIM = "1024";
+
+      const adapter = createEmbeddingFromEnv();
+      expect(adapter).toBeInstanceOf(LocalEmbeddingAdapter);
+      expect((adapter as LocalEmbeddingAdapter).dimension()).toBe(1024);
+    });
+
+    it("prefers local over an available cloud key when enabled", () => {
+      process.env.CHIASMUS_LOCAL_EMBED = "1";
+      process.env.CHIASMUS_LOCAL_EMBED_MODEL = "hf:foo/bar";
+      process.env.OPENAI_API_KEY = "sk-test";
+
+      const adapter = createEmbeddingFromEnv();
+      expect(adapter).toBeInstanceOf(LocalEmbeddingAdapter);
+    });
+
+    it("uses config-file localEmbeddings when passed (no env)", () => {
+      const config: ChiasmusConfig = {
+        adapterDiscovery: false,
+        localEmbeddings: { enabled: true, model: "hf:cfg/model", dimension: 768 },
+      };
+      const adapter = createEmbeddingFromEnv(config);
+      expect(adapter).toBeInstanceOf(LocalEmbeddingAdapter);
+      expect((adapter as LocalEmbeddingAdapter).dimension()).toBe(768);
+    });
+
+    it("does not use local when disabled, even with a model set", () => {
+      const config: ChiasmusConfig = {
+        adapterDiscovery: false,
+        localEmbeddings: { enabled: false, model: "hf:foo/bar" },
+      };
+      const adapter = createEmbeddingFromEnv(config);
+      expect(adapter).not.toBeInstanceOf(LocalEmbeddingAdapter);
+    });
+
+    it("falls through to a cloud provider when enabled but no model is set", () => {
+      process.env.CHIASMUS_LOCAL_EMBED = "1";
+      process.env.OPENAI_API_KEY = "sk-test";
+
+      const adapter = createEmbeddingFromEnv();
+      expect(adapter).toBeInstanceOf(OpenAICompatibleEmbeddingAdapter);
+    });
+
+    it("warns and returns null when enabled, no model, and no cloud provider", () => {
+      process.env.CHIASMUS_LOCAL_EMBED = "1";
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const adapter = createEmbeddingFromEnv();
+      expect(adapter).toBeNull();
+      expect(warn).toHaveBeenCalledWith(expect.stringMatching(/model/i));
     });
   });
 });

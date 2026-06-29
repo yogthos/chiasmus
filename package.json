@@ -1,6 +1,6 @@
 {
   "name": "chiasmus",
-  "version": "0.1.24",
+  "version": "0.1.26",
   "type": "module",
   "description": "Neurosymbolic verification engine - MCP server for formal reasoning with Z3 and SWI-Prolog (WASM)",
   "main": "dist/index.js",
@@ -92,6 +92,9 @@
     "tree-sitter-typescript": "^0.23.2",
     "web-tree-sitter": "^0.26.8",
     "z3-solver": "^4.16.0"
+  },
+  "optionalDependencies": {
+    "node-llama-cpp": "^3.18.1"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",

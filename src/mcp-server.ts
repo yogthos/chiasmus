@@ -1236,7 +1236,7 @@ export async function createChiasmusServer(
   // Use override if provided, otherwise try env
   const llm = llmOverride !== undefined ? llmOverride : createLLMFromEnv();
   const embedding =
-    embeddingOverride !== undefined ? embeddingOverride : createEmbeddingFromEnv();
+    embeddingOverride !== undefined ? embeddingOverride : createEmbeddingFromEnv(config, home);
   const formalizer = llm ? new FormalizationEngine(library, llm, embedding ?? undefined) : null;
   const learner = llm ? new SkillLearner(library, llm) : null;
   const embeddingHome = home;

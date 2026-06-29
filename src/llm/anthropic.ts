@@ -1,6 +1,8 @@
 import type { EmbeddingAdapter, LLMAdapter, LLMMessage } from "./types.js";
 import { OpenAICompatibleAdapter, OpenAICompatibleEmbeddingAdapter } from "./openai-compatible.js";
 import { AzureOpenAIEmbeddingAdapter } from "./azure-openai.js";
+import { LocalEmbeddingAdapter, resolveLocalEmbeddingConfig } from "./local-embeddings.js";
+import type { ChiasmusConfig } from "../config.js";
 
 const DEFAULT_MODEL = "claude-sonnet-4-6";
 const DEFAULT_URL = "https://api.anthropic.com/v1/messages";
@@ -112,14 +114,20 @@ export function createLLMFromEnv(): LLMAdapter | null {
 
 /**
  * Create an EmbeddingAdapter from environment variables, or null if not
- * configured. Anthropic has no embeddings API, so this checks third-party
- * providers:
+ * configured.
+ *
+ * Provider selection (first match wins):
+ *   CHIASMUS_LOCAL_EMBED (+ model) → local via node-llama-cpp (opt-in)
  *   AZURE_OPENAI_API_KEY (+ AZURE_OPENAI_API_ENDPOINT or AZURE_OPENAI_ENDPOINT,
  *                         + AZURE_OPENAI_EMBED_DEPLOYMENT)
  *                      → Azure OpenAI
  *   OPENAI_API_KEY     → OpenAI
  *   DEEPSEEK_API_KEY   → DeepSeek (OpenAI-compatible)
  *   OPENROUTER_API_KEY → OpenRouter (OpenAI-compatible)
+ *
+ * Local embeddings are configured either via the `localEmbeddings` block in
+ * ~/.chiasmus/config.json (the `config` argument) or the CHIASMUS_LOCAL_EMBED*
+ * env vars; env wins per field. When enabled, local takes priority over cloud.
  *
  * Override model with CHIASMUS_EMBED_MODEL, base URL with
  * CHIASMUS_EMBED_URL, and dimension with CHIASMUS_EMBED_DIM.
@@ -130,7 +138,27 @@ export function createLLMFromEnv(): LLMAdapter | null {
  * must be supplied via AZURE_OPENAI_EMBED_DEPLOYMENT; there is no safe
  * default. API version comes from AZURE_OPENAI_API_VERSION.
  */
-export function createEmbeddingFromEnv(): EmbeddingAdapter | null {
+export function createEmbeddingFromEnv(
+  config?: ChiasmusConfig,
+  chiasmusHome?: string,
+): EmbeddingAdapter | null {
+  const local = resolveLocalEmbeddingConfig(config, process.env, chiasmusHome);
+  if (local.enabled) {
+    if (local.model) {
+      return new LocalEmbeddingAdapter({
+        model: local.model,
+        modelsDir: local.modelsDir,
+        dimension: local.dimension,
+        batchSize: local.batchSize,
+      });
+    }
+    console.warn(
+      "[chiasmus] Local embeddings are enabled but no model is configured. " +
+        "Set `localEmbeddings.model` in config.json or CHIASMUS_LOCAL_EMBED_MODEL " +
+        "(e.g. \"hf:Qwen/Qwen3-Embedding-0.6B-GGUF\"). Falling back to cloud providers.",
+    );
+  }
+
   const model = process.env.CHIASMUS_EMBED_MODEL ?? "text-embedding-3-small";
   const customUrl = process.env.CHIASMUS_EMBED_URL;
   const dimEnv = process.env.CHIASMUS_EMBED_DIM;
