@@ -98,7 +98,6 @@
     "@types/node": "^22.0.0",
     "@types/proper-lockfile": "^4.1.4",
     "graphology-types": "^0.24.8",
-    "node-llama-cpp": "^3.18.1",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0",
     "vitest": "^4.0.17"
