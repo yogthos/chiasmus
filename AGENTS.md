@@ -27,7 +27,7 @@ CI runs on push/PR to `main` (`.github/workflows/test.yml`):
 2. `pnpm typecheck`
 3. `pnpm test:run`
 
-Tested on Node 20 and 22.
+Tested on Node 22 and 24. Minimum is Node 22 (better-sqlite3 13 requires it; Node 20 went EOL 2026-04-30).
 
 ## Code Organization
 
