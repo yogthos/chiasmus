@@ -9,6 +9,7 @@
  */
 
 import type { CodeGraph } from "./types.js";
+import { resolveSymbolNames } from "./graph-util.js";
 
 /** Index structure built once per graph and reused across analyses. */
 interface GraphIndex {
@@ -288,39 +289,10 @@ function quoteIfNeeded(s: string): string {
   return `'${escaped}'`;
 }
 
-//
-// Resolve a user-supplied target name to every matching node in the graph.
-//
-// Clojure (and any other language that emits namespace-qualified names)
-// stores defines as `my.ns/fn`. A user running
-//   chiasmus_graph analysis=callers target=fn
-// expects to find callers of `fn` regardless of namespace. We match:
-//   1. exact name — fast path for languages that use bare names
-//   2. any `<ns>/target` suffix — a user typing `from-input-stream` gets
-//      every `toda.hash/from-input-stream`, `toda.packet/from-input-stream`,
-//      etc.
-//
-// If the input already contains a `/` it's treated as fully qualified and
-// we only check exact match. Returns an empty array when nothing matches,
-// so downstream analyses can short-circuit.
-//
+// Resolve a user-supplied target to graph node names. Unqualified targets
+// match any namespace- or package-qualified suffix; see resolveSymbolNames.
 function resolveTargets(graph: CodeGraph, target: string): string[] {
-  const allNames = new Set<string>();
-  for (const d of graph.defines) allNames.add(d.name);
-  for (const c of graph.calls) {
-    allNames.add(c.caller);
-    allNames.add(c.callee);
-  }
-
-  if (allNames.has(target)) return [target];
-  if (target.includes("/")) return [];
-
-  const suffix = `/${target}`;
-  const matches: string[] = [];
-  for (const n of allNames) {
-    if (n.endsWith(suffix)) matches.push(n);
-  }
-  return matches;
+  return resolveSymbolNames(graph, target);
 }
 
 /**

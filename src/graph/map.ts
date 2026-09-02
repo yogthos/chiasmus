@@ -13,6 +13,7 @@
  */
 
 import type { CodeGraph, DefinesFact, ImportsFact } from "./types.js";
+import { resolveSymbolNames } from "./graph-util.js";
 
 const DEFAULT_MAX_EXPORTS_PER_FILE = 8;
 const DEFAULT_DOC_LEN = 160;
@@ -193,18 +194,24 @@ export function buildFileDetail(graph: CodeGraph, path: string): FileDetail | nu
  * Build a symbol-level detail: where the name is defined, who calls it,
  * what it calls. Operates on the raw calls list so it works on any graph
  * shape (no extra indexing required).
+ *
+ * An unqualified `name` matches every namespace- or package-qualified node
+ * that ends in it, so `mid` finds `my.ns/mid` and `app:mid` — the same
+ * resolution `chiasmus_graph` targets get.
  */
 export function buildSymbolDetail(graph: CodeGraph, name: string): SymbolDetail {
+  const targets = new Set(resolveSymbolNames(graph, name));
+
   const defines = graph.defines
-    .filter((d) => d.name === name)
+    .filter((d) => targets.has(d.name))
     .map((d) => ({ file: d.file, kind: d.kind, line: d.line, signature: d.signature }));
 
   const callers = Array.from(
-    new Set(graph.calls.filter((c) => c.callee === name).map((c) => c.caller)),
+    new Set(graph.calls.filter((c) => targets.has(c.callee)).map((c) => c.caller)),
   ).sort();
 
   const callees = Array.from(
-    new Set(graph.calls.filter((c) => c.caller === name).map((c) => c.callee)),
+    new Set(graph.calls.filter((c) => targets.has(c.caller)).map((c) => c.callee)),
   ).sort();
 
   return { kind: "symbol", name, defines, callers, callees };

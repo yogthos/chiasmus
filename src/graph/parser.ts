@@ -1,21 +1,36 @@
 import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 import { extname, resolve, dirname } from "node:path";
 import { getAdapter, getAdapterForExt, getAdapterExtensions } from "./adapter-registry.js";
 
 const require = createRequire(import.meta.url);
 
-// Lazy-loaded tree-sitter parsers (native for CJS grammars, WASM for Clojure)
+/**
+ * Chiasmus package root. This file lives at `<root>/src/graph/parser.ts` in
+ * dev and `<root>/dist/graph/parser.js` when published — two levels up from
+ * either lands on the package root, where `grammars/` sits.
+ */
+const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+
+// Lazy-loaded tree-sitter parsers (native for CJS grammars, WASM for the lisps)
 let NativeParser: any = null;
 let nativeParserInstance: any = null;
 let WasmParserClass: any = null;
 let WasmLanguageClass: any = null;
 let wasmParserInstance: any = null;
 const languageCache = new Map<string, { lang: any; wasm: boolean }>();
+/** Compiled WASM Languages keyed by .wasm path, so shared grammars compile once. */
+const wasmLanguageByPath = new Map<string, any>();
 
 interface LangConfig {
-  package: string;
+  /** npm package providing the grammar. Omitted for grammars vendored in `grammars/`. */
+  package?: string;
   moduleExport?: string;
   wasm?: boolean;
+  /**
+   * WASM file, resolved inside `package` when one is given and against the
+   * chiasmus package root otherwise.
+   */
   wasmFile?: string;
 }
 
@@ -27,6 +42,13 @@ const LANGUAGE_CONFIG: Record<string, LangConfig> = {
   go: { package: "tree-sitter-go" },
   rust: { package: "tree-sitter-rust" },
   clojure: { package: "@yogthos/tree-sitter-clojure", wasm: true, wasmFile: "tree-sitter-clojure.wasm" },
+  // Scheme and Common Lisp ship as vendored WASM — see grammars/README.md for
+  // provenance and why neither uses the native bindings. Racket reuses the
+  // Scheme grammar but keeps its own language id so `.rkt` files report as
+  // racket in the map projection.
+  scheme: { wasm: true, wasmFile: "grammars/tree-sitter-scheme.wasm" },
+  racket: { wasm: true, wasmFile: "grammars/tree-sitter-scheme.wasm" },
+  commonlisp: { wasm: true, wasmFile: "grammars/tree-sitter-commonlisp.wasm" },
 };
 
 const EXT_MAP: Record<string, string> = {
@@ -46,6 +68,16 @@ const EXT_MAP: Record<string, string> = {
   ".cljs": "clojure",
   ".cljc": "clojure",
   ".edn": "clojure",
+  ".scm": "scheme",
+  ".ss": "scheme",
+  ".sld": "scheme",
+  ".sls": "scheme",
+  ".sps": "scheme",
+  ".rkt": "racket",
+  ".lisp": "commonlisp",
+  ".lsp": "commonlisp",
+  ".cl": "commonlisp",
+  ".asd": "commonlisp",
 };
 
 function getNativeParser(): any {
@@ -89,7 +121,7 @@ function loadLanguageSync(language: string): { lang: any; wasm: boolean } | null
   if (cached && !cached.wasm) return cached;
 
   const config = getLangConfig(language);
-  if (!config || config.wasm) return null;
+  if (!config || config.wasm || !config.package) return null;
 
   try {
     let mod = require(config.package);
@@ -114,14 +146,24 @@ async function loadLanguageAsync(language: string): Promise<{ lang: any; wasm: b
   try {
     if (config.wasm && config.wasmFile) {
       await initWasm();
-      const pkgPath = require.resolve(`${config.package}/package.json`);
-      const pkgDir = dirname(pkgPath);
-      const wasmPath = resolve(pkgDir, config.wasmFile);
-      const lang = await WasmLanguageClass.load(wasmPath);
+      // Vendored grammars resolve against the chiasmus package root; grammars
+      // shipped by an npm package resolve inside that package.
+      const baseDir = config.package
+        ? dirname(require.resolve(`${config.package}/package.json`))
+        : PACKAGE_ROOT;
+      const wasmPath = resolve(baseDir, config.wasmFile);
+      // Languages can share one grammar file (racket reuses scheme's), so
+      // cache the compiled Language by path to avoid a second compile.
+      let lang = wasmLanguageByPath.get(wasmPath);
+      if (!lang) {
+        lang = await WasmLanguageClass.load(wasmPath);
+        wasmLanguageByPath.set(wasmPath, lang);
+      }
       const entry = { lang, wasm: true };
       languageCache.set(language, entry);
       return entry;
     }
+    if (!config.package) return null;
     let mod = require(config.package);
     if (config.moduleExport) {
       mod = mod[config.moduleExport];
