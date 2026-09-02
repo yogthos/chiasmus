@@ -1,4 +1,5 @@
 import { parseSource, parseSourceAsync, getLanguageForFile } from "./parser.js";
+import { walkScheme, walkCommonLisp, resolveCommonLispPackageCalls } from "./extract-sexp.js";
 import { getAdapter } from "./adapter-registry.js";
 import { checkFileCache, saveFileCache, type CacheOptions } from "./cache.js";
 import type { CodeGraph, DefinesFact, CallsFact, ImportsFact, ExportsFact, ContainsFact, FileNode, FileTypeInfo, PendingCall } from "./types.js";
@@ -176,6 +177,10 @@ export async function extractGraph(
     resolveCallsWithRegistry(merged, registry);
   }
 
+  // Common Lisp packages span files, so a bare callee can only be matched
+  // against sibling defines once the whole batch is merged.
+  resolveCommonLispPackageCalls(merged);
+
   // Import resolution: rewrite through tsconfig aliases and the suffix
   // index to produce ImportsFact.resolved pointing at the canonical
   // in-batch file path (repo-relative).
@@ -217,7 +222,7 @@ async function extractFileGraph(file: { path: string; content: string }): Promis
   try {
     const doc = extractFileDoc(tree.rootNode, lang);
     if (doc) fileNode.fileDoc = doc;
-    extractFromTree(tree, file.path, lang, defines, calls, imports, exports, contains, callSet);
+    extractFromTree(tree, file.path, lang, defines, calls, imports, exports, contains, callSet, fileNode);
     // Collect receiver-chain + class-field type info for TS/JS. Lets a
     // later project-wide pass fill `calleeQN` on matching CallsFacts.
     // Wrap in try/catch so an unexpected AST shape never sinks the main
@@ -268,6 +273,10 @@ function countLines(content: string): number {
  *              convention (`// Package foo does X.`).
  *   Clojure  — no leading `;` comments captured; the idiomatic spot is
  *              the ns docstring, which we don't parse yet.
+ *   Scheme / — a leading `;;;` block. Both communities reserve three or
+ *   Lisp       more semicolons for file-level commentary and use `;;` for
+ *              section notes and copyright headers, so the extra semicolon
+ *              is the signal that this is documentation.
  *
  * Result is collapsed to a single paragraph and truncated to DOC_MAX_LEN.
  */
@@ -314,6 +323,7 @@ function isCommentNode(type: string): boolean {
 function isDocShape(raw: string, lang: string): boolean {
   const s = raw.trimStart();
   if (lang === "go") return s.startsWith("//");
+  if (lang === "scheme" || lang === "racket" || lang === "commonlisp") return /^;{3,}/.test(s);
   // Rust: doc comments are `///` (outer) and `//!` (inner/module) line
   // comments, plus `/** */` block docs. Plain `//` is noise.
   if (lang === "rust") return s.startsWith("///") || s.startsWith("//!") || s.startsWith("/**");
@@ -328,7 +338,7 @@ function normalizeCommentText(raw: string): string {
   if (s.endsWith("*/")) s = s.slice(0, -2);
   const parts = s
     .split("\n")
-    .map((l) => l.replace(/^\s*(?:\/+!?|#+|\*+)\s?/, "").trim())
+    .map((l) => l.replace(/^\s*(?:\/+!?|#+|\*+|;+)\s?/, "").trim())
     .filter(Boolean);
   return parts.join(" ");
 }
@@ -390,6 +400,7 @@ function extractFromTree(
   exports: ExportsFact[],
   contains: ContainsFact[],
   callSet: Set<string>,
+  fileNode: FileNode,
 ): void {
   const adapter = getAdapter(lang);
   if (adapter) {
@@ -404,6 +415,10 @@ function extractFromTree(
     for (const c of partial.contains ?? []) contains.push(c);
   } else if (lang === "clojure") {
     walkClojure(tree.rootNode, filePath, defines, calls, imports, exports, callSet);
+  } else if (lang === "scheme" || lang === "racket") {
+    walkScheme(tree.rootNode, filePath, defines, calls, imports, exports, callSet);
+  } else if (lang === "commonlisp") {
+    walkCommonLisp(tree.rootNode, filePath, defines, calls, imports, exports, callSet, fileNode);
   } else if (lang === "python") {
     const scopeStack: string[] = [];
     walkPython(tree.rootNode, filePath, scopeStack, defines, calls, imports, exports, contains, callSet);

@@ -134,6 +134,33 @@ describe("buildSymbolDetail", () => {
     expect(detail.callees).toContain("leaf");
   });
 
+  it("resolves an unqualified name against namespace-qualified defines", async () => {
+    // Clojure stores `my.ns/mid`; a user asking for `mid` should still get it.
+    const graph = await extractGraph([
+      {
+        path: "/repo/a.clj",
+        content: `(ns my.ns)\n(defn top [] (mid))\n(defn mid [] (leaf))\n(defn leaf [] 1)`,
+      },
+    ]);
+    const detail = buildSymbolDetail(graph, "mid");
+    expect(detail.defines[0]?.file).toBe("/repo/a.clj");
+    expect(detail.callers).toContain("my.ns/top");
+    expect(detail.callees).toContain("my.ns/leaf");
+  });
+
+  it("resolves an unqualified name against package-qualified defines", async () => {
+    const graph = await extractGraph([
+      {
+        path: "/repo/a.lisp",
+        content: `(in-package #:app)\n(defun top () (mid))\n(defun mid () (leaf))\n(defun leaf () 1)`,
+      },
+    ]);
+    const detail = buildSymbolDetail(graph, "mid");
+    expect(detail.defines[0]?.file).toBe("/repo/a.lisp");
+    expect(detail.callers).toContain("app:top");
+    expect(detail.callees).toContain("app:leaf");
+  });
+
   it("returns empty arrays for an unknown symbol", async () => {
     const graph = await extractGraph([
       { path: "/repo/a.ts", content: "function only() {}" },

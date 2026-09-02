@@ -106,7 +106,7 @@ chiasmus_verify solver="prolog" format="mermaid"
 
 **`chiasmus_graph`** — Analyze source code call graphs via tree-sitter + Prolog. Parses source files, extracts cross-module call graphs, runs formal analyses.
 
-Built-in language support: **TypeScript**, **JavaScript**, **Python**, **Go**, **Rust**, **Clojure/ClojureScript**. Additional languages can be added via [custom adapters](#custom-language-adapters).
+Built-in language support: **TypeScript**, **JavaScript**, **Python**, **Go**, **Rust**, **Clojure/ClojureScript**, **Scheme**, **Racket**, **Common Lisp**. Additional languages can be added via [custom adapters](#custom-language-adapters).
 
 ```
 chiasmus_graph files=["src/server.ts", "src/db.ts"] analysis="callers" target="query"

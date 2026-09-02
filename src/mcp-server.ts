@@ -243,7 +243,7 @@ Returns cleaned spec + fixes applied + remaining errors.`,
   {
     name: "chiasmus_graph",
     description: `Analyze source-code call graphs (tree-sitter + Prolog). Absolute paths only.
-Languages: TypeScript, JavaScript, Python, Go, Rust, Clojure.
+Languages: TypeScript, JavaScript, Python, Go, Rust, Clojure, Scheme, Racket, Common Lisp.
 
 ANALYSES:
   summary         overview counts
@@ -439,9 +439,9 @@ MODES:
 
 FORMAT: markdown (default) | json
 
-fileDoc sources per language: TS/JS JSDoc /** */ only; Python """...""" module docstring; Go // package-doc comments; Rust /// and //! doc comments; Clojure none (yet). License/SPDX headers, shebangs, and plain // line comments are rejected as non-doc.
+fileDoc sources per language: TS/JS JSDoc /** */ only; Python """...""" module docstring; Go // package-doc comments; Rust /// and //! doc comments; Scheme/Racket/Common Lisp leading ;;; block; Clojure none (yet). License/SPDX headers, shebangs, and plain // line comments are rejected as non-doc.
 
-Absolute paths only. Languages: TypeScript, JavaScript, Python, Go, Rust, Clojure.
+Absolute paths only. Languages: TypeScript, JavaScript, Python, Go, Rust, Clojure, Scheme, Racket, Common Lisp.
 Set cache=true to reuse the per-file extraction cache across calls.`,
     inputSchema: {
       type: "object" as const,
@@ -492,7 +492,7 @@ Set cache=true to reuse the per-file extraction cache across calls.`,
 
 Uses embeddings + cosine similarity. Returns a ranked list of {name, file, line, signature, leadingDoc, score}. Ranking is by closeness of the concept, NOT by exact name match — use this when you're looking for "where do we refresh OAuth tokens" or "rate-limit logic" across an unfamiliar codebase.
 
-Absolute paths only. Languages: TypeScript, JavaScript, Python, Go, Rust, Clojure.
+Absolute paths only. Languages: TypeScript, JavaScript, Python, Go, Rust, Clojure, Scheme, Racket, Common Lisp.
 
 Requires an embedding provider configured via env:
   OPENAI_API_KEY / DEEPSEEK_API_KEY / OPENROUTER_API_KEY  → auto-detected

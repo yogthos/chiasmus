@@ -27,7 +27,7 @@ CI runs on push/PR to `main` (`.github/workflows/test.yml`):
 2. `pnpm typecheck`
 3. `pnpm test:run`
 
-Tested on Node 20 and 22.
+Tested on Node 22 and 24. Minimum is Node 22 (better-sqlite3 13 requires it; Node 20 went EOL 2026-04-30).
 
 ## Code Organization
 
@@ -55,8 +55,9 @@ src/
 │   └── relationships.ts   # Template relationship/suggestion graph
 ├── graph/
 │   ├── types.ts           # CodeGraph, LanguageAdapter, FileNode, Hyperedge, DefinesFact, CallsFact.calleeQN, ImportsFact.resolved, FileTypeInfo
-│   ├── parser.ts          # tree-sitter lang registry + sync/async parse for TS/JS/Py/Go/Rust/Clojure
+│   ├── parser.ts          # tree-sitter lang registry + sync/async parse for TS/JS/Py/Go/Rust/Clojure/Scheme/Racket/CL
 │   ├── extractor.ts       # AST walking + per-language call graph extraction + TS/JS collectTypeInfo
+│   ├── extract-sexp.ts    # Scheme/Racket + Common Lisp extraction (scope-aware s-expression walkers)
 │   ├── facts.ts           # graphToProlog — CodeGraph → Prolog facts (incl. calls_qn/3, imports_resolved/3)
 │   ├── analyses.ts        # runAnalysis — dispatches all graph analyses
 │   ├── native-analyses.ts # O(V+E) cycles/reachability/impact/dead-code/callers/callees
@@ -260,12 +261,13 @@ Options:
 - `cache=true`: reuse the shared per-file extraction cache (same directory and invalidation as `chiasmus_graph`).
 
 Data sources (added to `CodeGraph` for this feature):
-- `FileNode.fileDoc` — language-specific, idiomatic doc only: TS/JS JSDoc `/** */`, Python `"""..."""` module docstring, Go `//` package-doc comments, Rust `///` and `//!` doc comments. Plain `//` line comments in TS/JS, `#` comments in Python, and `;` comments in Clojure are intentionally rejected (usually license/shebang noise).
+- `FileNode.fileDoc` — language-specific, idiomatic doc only: TS/JS JSDoc `/** */`, Python `"""..."""` module docstring, Go `//` package-doc comments, Rust `///` and `//!` doc comments, Scheme/Racket/Common Lisp leading `;;;` blocks. Plain `//` line comments in TS/JS, `#` comments in Python, `;;` comments in the lisps, and `;` comments in Clojure are intentionally rejected (usually license/shebang noise).
 - `FileNode.tokenEstimate` — `ceil(content.length / 3.5)` so an agent can read-budget.
 - `FileNode.lineCount` — newline-count with trailing-line adjustment.
-- `DefinesFact.signature` — params + return type (TS/JS/Python/Go/Rust); arglist vector for Clojure `defn` and `defprotocol`/`definterface` methods.
+- `DefinesFact.signature` — params + return type (TS/JS/Python/Go/Rust); arglist vector for Clojure `defn` and `defprotocol`/`definterface` methods; arglist for Scheme `define` and Common Lisp `defun`.
 - TypeScript exports now also include `interface`, `type`, and `enum` declarations, so `exportCount` reflects the full public surface.
-- Cache schema is currently `"3"` (bumped when `CodeGraph._typeInfo` and `CallsFact.calleeQN` landed). Older caches auto-invalidate on upgrade.
+- `FileNode.namespace` — the file's `(in-package ...)` for Common Lisp; drives cross-file package resolution. Unset for every other language.
+- Cache schema is currently `"4"` (bumped when `FileNode.namespace` landed). Older caches auto-invalidate on upgrade.
 
 ### TS/JS qualified-name resolution
 
@@ -285,6 +287,19 @@ Two passes, both best-effort (failure never blocks the base graph):
    - Fallbacks: (a) unique method owner via `graph.contains`, (b) unique flat-registry owner. Ambiguous names stay without a QN rather than guess.
 
 Matching `CallsFact`s get their `calleeQN = "Class.method"`. Emitted as `calls_qn/3` Prolog facts alongside back-compat `calls/2`.
+
+### S-expression languages (Scheme / Racket / Common Lisp)
+
+`src/graph/extract-sexp.ts`, dispatched from `extractFromTree`. Same two-phase shape as `walkClojure` (top-level defines first, then call edges), plus two things Clojure doesn't need:
+
+- **Lexical scope.** Both walkers carry a set of locally bound names — lambda parameters, `let`/`labels` bindings, internal defines, a named let's loop variable — and skip them for both the head-symbol rule and the in-file-reference rule. Without it `(let loop ((i 0)) ... (loop ...))` mints a global `loop` node in every file, and those merge into one fabricated hub that skews `hubs`/`bridges`/`communities`.
+- **Cross-file package resolution** (`resolveCommonLispPackageCalls`). A CL package spans files, so a bare callee could be a sibling define or a standard-library function; the per-file walk leaves it bare and this pass, run on the merged graph, promotes the ones that match a define in the caller's package. Runs only when the batch has a `commonlisp` file, and leaves the standard library bare so `subseq` doesn't become one node per calling package.
+
+Names are package-qualified for Common Lisp (`app:run`, from `(in-package :app)`, with `pkg::name` normalized to `pkg:name`) and bare for Scheme — Scheme's module story is split across R6RS/R7RS/Guile/Racket with no single file-level declaration to key on. `resolveTargets` in `native-analyses.ts` matches an unqualified target against both `/` (Clojure) and `:` (CL) suffixes.
+
+Exports default to every top-level definition, and narrow to the explicit list when the file has one: `(provide ...)`, `(export ...)`, Guile `#:export`, or a `defpackage` `(:export ...)` clause.
+
+Grammars are vendored WASM under `grammars/` — see `grammars/README.md` for provenance, why Scheme can't use the native bindings, and how to rebuild.
 
 ### Import resolution
 

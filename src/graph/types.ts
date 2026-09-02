@@ -60,6 +60,13 @@ export interface FileNode {
    * file. Undefined when the file has no leading comment or docstring.
    */
   fileDoc?: string;
+  /**
+   * Namespace/package the file's definitions belong to, when the language
+   * has a file-level declaration for one — currently `(in-package :foo)` in
+   * Common Lisp. Lets project-wide passes attribute a file's top-level code
+   * to its package even when the file defines nothing.
+   */
+  namespace?: string;
   /** Approximate token count (content length / 3.5, rounded up). */
   tokenEstimate?: number;
   /** Total line count of the file at extraction time. */
