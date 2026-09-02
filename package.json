@@ -1,6 +1,6 @@
 {
   "name": "chiasmus",
-  "version": "0.1.27",
+  "version": "0.1.28",
   "type": "module",
   "description": "Neurosymbolic verification engine - MCP server for formal reasoning with Z3 and SWI-Prolog (WASM)",
   "main": "dist/index.js",
