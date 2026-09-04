@@ -59,7 +59,8 @@ graph TD
     it("includes reachability rules", () => {
       const prolog = parseMermaid("graph TD\n  A --> B");
       expect(prolog).toContain("reaches(");
-      expect(prolog).toContain("member(");
+      expect(prolog).toContain("chiasmus_member(");
+      expect(prolog).not.toMatch(/^member\(/m);
     });
 
     it("handles flowchart keyword", () => {

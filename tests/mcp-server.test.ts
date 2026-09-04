@@ -420,6 +420,24 @@ describe("Chiasmus MCP Server", () => {
       expect(parsed[2].answers[0].bindings.X).toBe("d");
     });
 
+    it("consults once and shares the session module across a batch", async () => {
+      const result = await client.callTool({
+        name: "chiasmus_verify",
+        arguments: {
+          solver: "prolog",
+          input: ":- dynamic(seen/1).",
+          queries: ["assertz(seen(first)).", "seen(X)."],
+        },
+      });
+
+      const content = result.content as Array<{ type: string; text: string }>;
+      const parsed = JSON.parse(content[0].text);
+      expect(parsed).toHaveLength(2);
+      expect(parsed[0].status).toBe("success");
+      expect(parsed[1].status).toBe("success");
+      expect(parsed[1].answers[0].bindings.X).toBe("first");
+    });
+
     it("stops batch on first error", async () => {
       const result = await client.callTool({
         name: "chiasmus_verify",

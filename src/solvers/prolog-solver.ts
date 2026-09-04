@@ -1,5 +1,11 @@
 import { initProlog, type PrologFull } from "prolog-wasm-full";
-import type { Solver, SolverInput, SolverResult, PrologAnswer } from "./types.js";
+import type {
+  PrologAnswer,
+  PrologBatchInput,
+  Solver,
+  SolverInput,
+  SolverResult,
+} from "./types.js";
 
 const MAX_ANSWERS = 1000;
 const DEFAULT_MAX_INFERENCES = 100_000;
@@ -48,7 +54,9 @@ async function getPl(): Promise<PrologFull> {
     // failing silently with `Unknown procedure: system:$chiasmus_msg/2` and
     // dropping the error on the floor.
     pl.consult(`
-      :- use_module(library(lists)).
+      % The JS query API parses goals in user, so CLP(FD)'s operators must
+      % also exist there even though each disposable session imports the
+      % predicates into its own module.
       :- use_module(library(clpfd)).
       :- dynamic(user:'$chiasmus_msg'/2).
       :- multifile(user:message_hook/3).
@@ -476,170 +484,210 @@ function findNeck(clause: string): number {
   return -1;
 }
 
+function solveSessionQuery(
+  pl: PrologFull,
+  moduleId: string,
+  query: string,
+  inferenceBudget: number,
+  explain: boolean,
+): SolverResult {
+  const normalized = normalizeQuery(query);
+  if (!normalized) return { status: "error", error: "empty query" };
+
+  const parseErr = validateQuery(pl, normalized);
+  if (parseErr) return { status: "error", error: parseErr };
+
+  // A batch shares one instrumented program, but each result must describe
+  // only its own derivation.
+  if (explain) {
+    try {
+      pl.stock.call(`retractall(${moduleId}:trace_goal(_))`);
+    } catch (e) {
+      return {
+        status: "error",
+        error: `failed to reset trace: ${e instanceof Error ? e.message : String(e)}`,
+      };
+    }
+  }
+
+  // Wrap the user goal in three concentric layers (innermost first):
+  //   1. `${moduleId}:Goal` — resolve predicates against the session module.
+  //   2. `call_with_inference_limit` — bound runaway searches.
+  //   3. `catch` — turn Prolog exceptions into structured solver errors.
+  const wrapped =
+    `catch(` +
+    `call_with_inference_limit((${moduleId}:(${normalized})), ${inferenceBudget}, ${LIMIT_MARKER_VAR}), ` +
+    `${ERR_VAR}, ` +
+    `(with_output_to(string(${ERR_STR_VAR}), write(${ERR_VAR})), ` +
+    `assertz(user:'$chiasmus_msg'(error, ${ERR_STR_VAR})), fail))`;
+
+  clearMessages(pl);
+  const queryResult = runQuery(pl, wrapped, { detectLimitMarker: true });
+  const queryErrs = collectErrorMessages(pl);
+  if (queryErrs.length > 0) {
+    return { status: "error", error: queryErrs.join("\n") };
+  }
+  if ("error" in queryResult) {
+    return { status: "error", error: queryResult.error };
+  }
+
+  const answers: PrologAnswer[] = queryResult.answers.map((bindings) => ({
+    bindings,
+    formatted: bindingsToFormatted(bindings),
+  }));
+
+  if (!explain) return { status: "success", answers };
+
+  const traceResult = runQuery(pl, `${moduleId}:trace_goal(X)`, {
+    maxAnswers: MAX_TRACE_ENTRIES,
+  });
+  if ("error" in traceResult) return { status: "success", answers };
+
+  const trace: string[] = [];
+  const seen = new Set<string>();
+  for (const row of traceResult.answers) {
+    const entry = row.X;
+    if (typeof entry === "string" && !seen.has(entry)) {
+      seen.add(entry);
+      trace.push(entry);
+    }
+  }
+  return { status: "success", answers, trace };
+}
+
 export function createPrologSolver(): Solver {
   let disposed = false;
+
+  const solveProgram = async (
+    userProgram: string,
+    queries: string[],
+    explain: boolean,
+    inferenceBudget: number,
+  ): Promise<SolverResult[]> => {
+    if (disposed) {
+      return [{ status: "error", error: "Solver has been disposed" }];
+    }
+    if (queries.length === 0) {
+      return [{ status: "error", error: "At least one Prolog query is required" }];
+    }
+
+    let pl: PrologFull;
+    try {
+      pl = await getPl();
+    } catch (e) {
+      return [{
+        status: "error",
+        error: `prolog init failed: ${e instanceof Error ? e.message : String(e)}`,
+      }];
+    }
+
+    const moduleId = uniqueSessionModule();
+    const path = uniqueTempPath();
+    if (!SAFE_PATH_RE.test(path)) {
+      return [{
+        status: "error",
+        error: `internal: tempfile path failed safety check: ${path}`,
+      }];
+    }
+
+    // Wrap the user code in a fresh module. Do not eagerly import
+    // library(lists): SWI's weak imports can be overridden by a local member/2,
+    // and repeatedly unloading that collision corrupts SWI-WASM. List
+    // predicates remain available through autoloading. CLP(FD) is explicit
+    // because it installs module-local operators.
+    const program =
+      `:- module(${moduleId}, []).\n` +
+      `:- use_module(library(clpfd)).\n` +
+      (explain ? instrumentForTracing(userProgram) : userProgram);
+
+    let consulted = false;
+    const finalize = (results: SolverResult[]): SolverResult[] => {
+      const warnings = consulted
+        ? cleanupSession(pl, moduleId, path)
+        : tryUnlink(pl, path);
+      if (warnings.length === 0 || results.length === 0) return results;
+
+      const lastIndex = results.length - 1;
+      const last = results[lastIndex];
+      if (last.status !== "success" && last.status !== "error") return results;
+      return [
+        ...results.slice(0, lastIndex),
+        { ...last, warnings: [...(last.warnings ?? []), ...warnings] },
+      ];
+    };
+
+    try {
+      pl.em.FS.writeFile(path, program);
+    } catch (e) {
+      return finalize([{
+        status: "error",
+        error: `failed to stage program: ${e instanceof Error ? e.message : String(e)}`,
+      }]);
+    }
+
+    clearMessages(pl);
+    try {
+      pl.stock.call(`consult('${path}')`);
+      consulted = true;
+    } catch (e) {
+      return finalize([{
+        status: "error",
+        error: `consult failed: ${e instanceof Error ? e.message : String(e)}`,
+      }]);
+    }
+    const consultErrs = collectErrorMessages(pl);
+    if (consultErrs.length > 0) {
+      return finalize([{ status: "error", error: consultErrs.join("\n") }]);
+    }
+
+    const results: SolverResult[] = [];
+    for (const query of queries) {
+      const result = solveSessionQuery(
+        pl,
+        moduleId,
+        query,
+        inferenceBudget,
+        explain,
+      );
+      results.push(result);
+      if (result.status === "error") break;
+    }
+    return finalize(results);
+  };
 
   return {
     type: "prolog",
 
     async solve(input: SolverInput): Promise<SolverResult> {
-      if (disposed) {
-        return { status: "error", error: "Solver has been disposed" };
-      }
       if (input.type !== "prolog") {
         return { status: "error", error: "Expected prolog input type" };
       }
+      const results = await solveProgram(
+        input.program,
+        [input.query],
+        input.explain ?? false,
+        input.maxInferences ?? DEFAULT_MAX_INFERENCES,
+      );
+      return results[0];
+    },
 
-      let pl: PrologFull;
-      try {
-        pl = await getPl();
-      } catch (e) {
-        return {
-          status: "error",
-          error: `prolog init failed: ${e instanceof Error ? e.message : String(e)}`,
-        };
+    async solveBatch(input: PrologBatchInput): Promise<SolverResult[]> {
+      if (input.type !== "prolog") {
+        return [{ status: "error", error: "Expected prolog input type" }];
       }
-
-      const explain = input.explain ?? false;
-      const userProgram = explain
-        ? instrumentForTracing(input.program)
-        : input.program;
-      const inferenceBudget = input.maxInferences ?? DEFAULT_MAX_INFERENCES;
-
-      const moduleId = uniqueSessionModule();
-      const path = uniqueTempPath();
-      if (!SAFE_PATH_RE.test(path)) {
-        return {
-          status: "error",
-          error: `internal: tempfile path failed safety check: ${path}`,
-        };
+      if (!Array.isArray(input.queries) || input.queries.some((q) => typeof q !== "string")) {
+        return [{ status: "error", error: "queries array must contain only strings" }];
       }
-
-      // Wrap the user code in a fresh module. `:- module(M, [])` puts
-      // every definition in M's namespace; built-ins still resolve via
-      // the auto-imported `system` module, and we explicitly import
-      // the libraries the user is likely to reach for. This is what
-      // gives concurrent solves with overlapping predicate names
-      // independent state.
-      const program =
-        `:- module(${moduleId}, []).\n` +
-        `:- use_module(library(lists)).\n` +
-        `:- use_module(library(clpfd)).\n` +
-        userProgram;
-
-      let consulted = false;
-
-      const finalize = (
-        result: SolverResult,
-        prefix: string[] = [],
-      ): SolverResult => {
-        const cleanupWarnings = consulted
-          ? cleanupSession(pl, moduleId, path)
-          : tryUnlink(pl, path);
-        const warnings = [...prefix, ...cleanupWarnings];
-        if (warnings.length === 0) return result;
-        if (result.status === "success") {
-          return { ...result, warnings };
-        }
-        if (result.status === "error") {
-          return { ...result, warnings };
-        }
-        return result;
-      };
-
-      try {
-        pl.em.FS.writeFile(path, program);
-      } catch (e) {
-        return finalize({
-          status: "error",
-          error: `failed to stage program: ${e instanceof Error ? e.message : String(e)}`,
-        });
-      }
-
-      clearMessages(pl);
-      try {
-        pl.stock.call(`consult('${path}')`);
-        consulted = true;
-      } catch (e) {
-        return finalize({
-          status: "error",
-          error: `consult failed: ${e instanceof Error ? e.message : String(e)}`,
-        });
-      }
-      const consultErrs = collectErrorMessages(pl);
-      if (consultErrs.length > 0) {
-        return finalize({ status: "error", error: consultErrs.join("\n") });
-      }
-
-      const normalized = normalizeQuery(input.query);
-      if (!normalized) {
-        return finalize({ status: "error", error: "empty query" });
-      }
-      const parseErr = validateQuery(pl, normalized);
-      if (parseErr) {
-        return finalize({ status: "error", error: parseErr });
-      }
-
-      // Wrap the user goal in three concentric layers (innermost first):
-      //   1. `${moduleId}:Goal` — resolve predicates against the session
-      //      module, so the user's `parent(...)` finds their own clauses.
-      //   2. `call_with_inference_limit(..., Budget, Marker)` — bound
-      //      runaway labelings; Marker binds to LIMIT_EXCEEDED_ATOM on
-      //      overrun.
-      //   3. `catch(..., Err, recovery)` — turn existence_error and
-      //      friends into structured solver errors instead of letting
-      //      SWI print them and the JS handle silently return zero
-      //      answers. Recovery asserts the error term to our shared
-      //      message buffer and fails so the iterator terminates.
-      const wrapped =
-        `catch(` +
-        `call_with_inference_limit((${moduleId}:(${normalized})), ${inferenceBudget}, ${LIMIT_MARKER_VAR}), ` +
-        `${ERR_VAR}, ` +
-        `(with_output_to(string(${ERR_STR_VAR}), write(${ERR_VAR})), ` +
-        `assertz(user:'$chiasmus_msg'(error, ${ERR_STR_VAR})), fail))`;
-
-      clearMessages(pl);
-      const queryResult = runQuery(pl, wrapped, { detectLimitMarker: true });
-      const queryErrs = collectErrorMessages(pl);
-      if (queryErrs.length > 0) {
-        return finalize({ status: "error", error: queryErrs.join("\n") });
-      }
-      if ("error" in queryResult) {
-        return finalize({ status: "error", error: queryResult.error });
-      }
-
-      const answers: PrologAnswer[] = queryResult.answers.map((bindings) => ({
-        bindings,
-        formatted: bindingsToFormatted(bindings),
-      }));
-
-      if (!explain) {
-        return finalize({ status: "success", answers });
-      }
-
-      // Collect derivation trace from the session-local trace_goal/1.
-      const traceResult = runQuery(pl, `${moduleId}:trace_goal(X)`, {
-        maxAnswers: MAX_TRACE_ENTRIES,
-      });
-      if ("error" in traceResult) {
-        return finalize({ status: "success", answers });
-      }
-      const trace: string[] = [];
-      const seen = new Set<string>();
-      for (const row of traceResult.answers) {
-        const entry = row.X;
-        if (typeof entry === "string" && !seen.has(entry)) {
-          seen.add(entry);
-          trace.push(entry);
-        }
-      }
-      return finalize({ status: "success", answers, trace });
+      return solveProgram(
+        input.program,
+        input.queries,
+        input.explain ?? false,
+        input.maxInferences ?? DEFAULT_MAX_INFERENCES,
+      );
     },
 
     dispose() {
-      if (!disposed) {
-        disposed = true;
-      }
+      disposed = true;
     },
   };
 }

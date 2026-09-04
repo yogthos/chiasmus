@@ -21,10 +21,10 @@ export function escapeAtom(s: string): string {
   return `'${escaped}'`;
 }
 
-/** Shared list membership predicate (used by multiple rule sets) */
+/** Collision-resistant list membership predicate used by generated rules. */
 export const MEMBER_RULES = `
-member(X, [X|_]).
-member(X, [_|T]) :- member(X, T).`.trim();
+chiasmus_member(X, [X|_]).
+chiasmus_member(X, [_|T]) :- chiasmus_member(X, T).`.trim();
 
 /** Built-in Prolog rules for graph analysis (cycle-safe) */
 export const BUILTIN_RULES = `
@@ -33,12 +33,12 @@ ${MEMBER_RULES}
 % Cycle-safe reachability via visited list
 reaches(A, B) :- reaches(A, B, [A]).
 reaches(A, B, _) :- calls(A, B).
-reaches(A, B, Visited) :- calls(A, Mid), \\+ member(Mid, Visited), reaches(Mid, B, [Mid|Visited]).
+reaches(A, B, Visited) :- calls(A, Mid), \\+ chiasmus_member(Mid, Visited), reaches(Mid, B, [Mid|Visited]).
 
 % Path finding (returns the call chain)
 path(A, B, Path) :- path(A, B, [A], Path).
 path(A, B, _, [A, B]) :- calls(A, B).
-path(A, B, Visited, [A|Rest]) :- calls(A, Mid), \\+ member(Mid, Visited), path(Mid, B, [Mid|Visited], Rest).
+path(A, B, Visited, [A|Rest]) :- calls(A, Mid), \\+ chiasmus_member(Mid, Visited), path(Mid, B, [Mid|Visited], Rest).
 
 % Function-only reachability (for cycle detection).
 % Methods are excluded because unqualified method names collide across
@@ -50,7 +50,7 @@ path(A, B, Visited, [A|Rest]) :- calls(A, Mid), \\+ member(Mid, Visited), path(M
 func_calls(A, B) :- calls(A, B), \\+ defines(_, A, method, _), \\+ defines(_, B, method, _).
 func_reaches(A, B) :- func_reaches(A, B, [A]).
 func_reaches(A, B, _) :- func_calls(A, B).
-func_reaches(A, B, Visited) :- func_calls(A, Mid), \\+ member(Mid, Visited), func_reaches(Mid, B, [Mid|Visited]).
+func_reaches(A, B, Visited) :- func_calls(A, Mid), \\+ chiasmus_member(Mid, Visited), func_reaches(Mid, B, [Mid|Visited]).
 
 % Dead code: defined function not called by anyone and not an entry point.
 % Note: only kind=function is considered — methods (kind=method) are excluded

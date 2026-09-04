@@ -26,6 +26,9 @@ export interface Solver {
    */
   solve(input: SolverInput): Promise<SolverResult>;
 
+  /** Execute several Prolog goals against one consulted program. */
+  solveBatch?(input: PrologBatchInput): Promise<SolverResult[]>;
+
   /** Clean up any resources held by this solver instance */
   dispose(): void;
 }
@@ -45,3 +48,12 @@ export type SolverInput =
        */
       maxInferences?: number;
     };
+
+/** Several goals that share one Prolog program and module lifecycle. */
+export interface PrologBatchInput {
+  type: "prolog";
+  program: string;
+  queries: string[];
+  explain?: boolean;
+  maxInferences?: number;
+}

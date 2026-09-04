@@ -1,7 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { createZ3Solver } from "./z3-solver.js";
 import { createPrologSolver } from "./prolog-solver.js";
-import type { Solver, SolverType, SolverInput, SolverResult } from "./types.js";
+import type {
+  PrologBatchInput,
+  Solver,
+  SolverType,
+  SolverInput,
+  SolverResult,
+} from "./types.js";
 
 export class SolverSession {
   readonly id: string;
@@ -23,6 +29,13 @@ export class SolverSession {
 
   async solve(input: SolverInput): Promise<SolverResult> {
     return this.solver.solve(input);
+  }
+
+  async solveBatch(input: PrologBatchInput): Promise<SolverResult[]> {
+    if (!this.solver.solveBatch) {
+      return [{ status: "error", error: "Batch solving is only supported by Prolog" }];
+    }
+    return this.solver.solveBatch(input);
   }
 
   dispose(): void {
