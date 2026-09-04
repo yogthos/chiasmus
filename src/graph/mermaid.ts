@@ -23,14 +23,14 @@ const FLOWCHART_RULES = `
 ${MEMBER_RULES}
 reaches(A, B) :- reaches(A, B, [A]).
 reaches(A, B, _) :- edge(A, B).
-reaches(A, B, Visited) :- edge(A, Mid), \\+ member(Mid, Visited), reaches(Mid, B, [Mid|Visited]).
+reaches(A, B, Visited) :- edge(A, Mid), \\+ chiasmus_member(Mid, Visited), reaches(Mid, B, [Mid|Visited]).
 `.trim();
 
 const STATE_RULES = `
 ${MEMBER_RULES}
 can_reach(A, B) :- can_reach(A, B, [A]).
 can_reach(A, B, _) :- transition(A, B, _).
-can_reach(A, B, Visited) :- transition(A, Mid, _), \\+ member(Mid, Visited), can_reach(Mid, B, [Mid|Visited]).
+can_reach(A, B, Visited) :- transition(A, Mid, _), \\+ chiasmus_member(Mid, Visited), can_reach(Mid, B, [Mid|Visited]).
 `.trim();
 
 /** Normalize a mermaid node ID to a valid Prolog atom */

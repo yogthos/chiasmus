@@ -337,8 +337,10 @@ describe("PrologSolver", () => {
       b.dispose();
     });
 
-    it("imports library(lists) into the session module", async () => {
-      // member/2 lives in library(lists); the session module imports it.
+    it("autoloads list predicates without a blanket weak import", async () => {
+      // member/2 remains available through SWI's autoloader. Avoiding a
+      // blanket use_module(library(lists)) lets user programs safely provide
+      // their own member/2 without corrupting teardown state.
       solver = createPrologSolver();
       const result = await solver.solve({
         type: "prolog",
@@ -363,6 +365,73 @@ describe("PrologSolver", () => {
       expect(result.status).toBe("success");
       if (result.status === "success") {
         expect(result.answers.length).toBeGreaterThan(0);
+      }
+    });
+
+    it("parses CLP(FD) operators used directly in a query", async () => {
+      solver = createPrologSolver();
+      const result = await solver.solve({
+        type: "prolog",
+        program: "",
+        query: "X in 1..3, label([X]).",
+      });
+      expect(result.status).toBe("success");
+      if (result.status === "success") {
+        expect(result.answers.map((answer) => answer.bindings.X)).toEqual(["1", "2", "3"]);
+      }
+    });
+
+    it("does not corrupt the runtime when a program defines a lists predicate", async () => {
+      // SWI treats an explicit library(lists) import as weak: a local
+      // member/2 definition overrides it. Repeatedly unloading that collision
+      // used to trap in WASM and poison the process-wide Prolog singleton.
+      solver = createPrologSolver();
+      const edges = [
+        ["refuse", "attach_refusal"],
+        ["re_refuse", "attach_refusal"],
+        ["re_refuse_holder_moved", "re_refuse"],
+        ["attachable_holder", "refuse"],
+        ["attach_workspace_to_holder", "attach_write_boundary"],
+        ["attach_workspace_to_holder", "attachable_holder"],
+        ["attach_workspace_to_holder", "re_refuse"],
+        ["attach_workspace_to_holder", "re_refuse_holder_moved"],
+        ["attach_workspace_to_holder", "attached"],
+        ["attach_workspace_to_holder", "validate_bang"],
+        ["attach_workspace_to_holder", "reread_workspace_after_race"],
+        ["resolve_workspace", "attach_budget"],
+        ["resolve_workspace", "attachable_holder"],
+        ["resolve_workspace", "bootstrap_workspace_organization"],
+        ["resolve_workspace", "attach_workspace_to_holder"],
+        ["resolve_workspace", "validate_bang"],
+        ["resolve_workspace_for_login", "resolve_workspace"],
+        ["resolve_workspace_for_login", "lock_wait_exhausted"],
+        ["resolve_workspace_for_login", "transient_attach_failure_message"],
+        ["transient_attach_failure_message", "trc"],
+        ["lock_wait_exhausted", "pg_error_fields"],
+        ["process_access_token", "resolve_workspace_for_login"],
+        ["process_access_token", "handle_workspace_login_with_retry"],
+        ["process_access_token", "handle_basic_google_login"],
+        ["process_access_token", "notify_new_workspace"],
+        ["attach_write_boundary", "in_transaction_on"],
+        ["attach_write_boundary", "execute_one_on"],
+        ["attach_write_boundary", "execute_on"],
+      ].map(([from, to]) => `calls(${from}, ${to}).`).join("\n");
+      const program = `
+        ${edges}
+        member(X, [X|_]).
+        member(X, [_|T]) :- member(X, T).
+        reaches(A, B) :- reaches(A, B, [A]).
+        reaches(A, B, _) :- calls(A, B).
+        reaches(A, B, Visited) :- calls(A, Mid), \\+ member(Mid, Visited), reaches(Mid, B, [Mid|Visited]).
+      `;
+
+      for (let attempt = 0; attempt < 50; attempt++) {
+        const result = await solver.solve({
+          type: "prolog",
+          program,
+          query: "reaches(process_access_token, attach_write_boundary).",
+        });
+        expect(result, `attempt ${attempt + 1}`).toMatchObject({ status: "success" });
       }
     });
   });

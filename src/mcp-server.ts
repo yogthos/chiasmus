@@ -574,15 +574,17 @@ async function handleVerify(args: Record<string, unknown>): Promise<CallToolResu
             }) }],
           };
         }
-        // Batch mode: run multiple queries against same program
+        // Batch mode: consult the program once, run every query against that
+        // module, then tear it down once. Re-consulting per query amplified a
+        // SWI-WASM unload bug and made a single batch needlessly expensive.
         const session = await SolverSession.create("prolog");
         try {
-          const results: SolverResult[] = [];
-          for (const q of queries) {
-            const r = await session.solve({ type: "prolog", program: input, query: q as string, explain: explain ?? false });
-            results.push(r);
-            if (r.status === "error") break;
-          }
+          const results = await session.solveBatch({
+            type: "prolog",
+            program: input,
+            queries,
+            explain: explain ?? false,
+          });
           return {
             content: [{ type: "text", text: JSON.stringify(results, null, 2) }],
           };

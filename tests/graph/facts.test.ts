@@ -236,4 +236,61 @@ describe("graphToProlog", () => {
       expect(deadNames).not.toContain("used");
     }
   });
+
+  it("survives repeated graph reachability sessions without corrupting the WASM runtime", async () => {
+    // Regression for the production `memory access out of bounds` failure.
+    // Generated graph programs used to redefine member/2 after the solver had
+    // weak-imported library(lists). Repeated consult + teardown of that import
+    // collision corrupted SWI-WASM's singleton runtime, after which even tiny
+    // unrelated programs failed until the MCP process restarted.
+    const calls = [
+      ["refuse", "attach_refusal"],
+      ["re_refuse", "attach_refusal"],
+      ["re_refuse_holder_moved", "re_refuse"],
+      ["attachable_holder", "refuse"],
+      ["attach_workspace_to_holder", "attach_write_boundary"],
+      ["attach_workspace_to_holder", "attachable_holder"],
+      ["attach_workspace_to_holder", "re_refuse"],
+      ["attach_workspace_to_holder", "re_refuse_holder_moved"],
+      ["attach_workspace_to_holder", "attached"],
+      ["attach_workspace_to_holder", "validate_bang"],
+      ["attach_workspace_to_holder", "reread_workspace_after_race"],
+      ["resolve_workspace", "attach_budget"],
+      ["resolve_workspace", "attachable_holder"],
+      ["resolve_workspace", "bootstrap_workspace_organization"],
+      ["resolve_workspace", "attach_workspace_to_holder"],
+      ["resolve_workspace", "validate_bang"],
+      ["resolve_workspace_for_login", "resolve_workspace"],
+      ["resolve_workspace_for_login", "lock_wait_exhausted"],
+      ["resolve_workspace_for_login", "transient_attach_failure_message"],
+      ["transient_attach_failure_message", "trc"],
+      ["lock_wait_exhausted", "pg_error_fields"],
+      ["process_access_token", "resolve_workspace_for_login"],
+      ["process_access_token", "handle_workspace_login_with_retry"],
+      ["process_access_token", "handle_basic_google_login"],
+      ["process_access_token", "notify_new_workspace"],
+      ["attach_write_boundary", "in_transaction_on"],
+      ["attach_write_boundary", "execute_one_on"],
+      ["attach_write_boundary", "execute_on"],
+    ].map(([caller, callee]) => ({ caller, callee }));
+    const program = graphToProlog({
+      defines: [],
+      calls,
+      imports: [],
+      exports: [],
+      contains: [],
+    });
+    const solver = createPrologSolver();
+
+    for (let attempt = 0; attempt < 50; attempt++) {
+      const result = await solver.solve({
+        type: "prolog",
+        program,
+        query: "reaches(process_access_token, attach_write_boundary).",
+      });
+      expect(result, `attempt ${attempt + 1}`).toMatchObject({ status: "success" });
+    }
+
+    solver.dispose();
+  });
 });
