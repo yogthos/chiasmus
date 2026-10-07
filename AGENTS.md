@@ -301,6 +301,8 @@ Exports default to every top-level definition, and narrow to the explicit list w
 
 Grammars are vendored WASM under `grammars/` — see `grammars/README.md` for provenance, why Scheme can't use the native bindings, and how to rebuild.
 
+web-tree-sitter (all four Lisp grammars) is initialised once per thread: `initWasm()` and each grammar's `Language.load()` are single-flight promises, since concurrent parses on a cold thread would otherwise each instantiate their own runtime and grammar. `extractGraph` extracts files one at a time, so each WASM tree is walked and freed (`tree.delete()`) before the next file parses; started together, every tree of the batch would sit in the WASM heap at once, and the wasm32 heap tops out at 4 GB.
+
 ### Import resolution
 
 `extractGraph(files, { repoPath })` resolves each `ImportsFact.source` to a repo-relative `resolved` path when possible:
