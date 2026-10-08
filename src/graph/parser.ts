@@ -26,6 +26,36 @@ const languageCache = new Map<string, { lang: any; wasm: boolean }>();
  * concurrent callers share one load and shared grammars compile once.
  */
 const wasmLanguageByPath = new Map<string, Promise<any>>();
+/** First fatal WASM error seen by this process's web-tree-sitter instance. */
+let wasmFailureMessage: string | null = null;
+// `WebAssembly` isn't in this project's TS libs (ES2023 + node types).
+const WasmRuntimeError = (globalThis as { WebAssembly?: { RuntimeError: new () => Error } })
+  .WebAssembly?.RuntimeError;
+
+/**
+ * A WASM trap (`RuntimeError: memory access out of bounds`, `unreachable`,
+ * an Emscripten `Aborted(...)`) unwinds out of web-tree-sitter mid-operation
+ * and leaves its module-wide heap and stack in an undefined state. Every
+ * later parse in the same process is suspect, and the module can't be
+ * re-instantiated in place — only a fresh process recovers.
+ */
+export function isFatalWasmError(e: unknown): boolean {
+  if (WasmRuntimeError && e instanceof WasmRuntimeError) return true;
+  if (!(e instanceof Error)) return false;
+  return /memory access out of bounds|^Aborted\(/.test(e.message);
+}
+
+/** Record `e` if it is a fatal WASM error (first one wins). */
+export function noteWasmError(e: unknown): void {
+  if (wasmFailureMessage === null && isFatalWasmError(e)) {
+    wasmFailureMessage = e instanceof Error ? e.message : String(e);
+  }
+}
+
+/** Message of the fatal WASM error this process hit, or null if none. */
+export function wasmFailure(): string | null {
+  return wasmFailureMessage;
+}
 
 interface LangConfig {
   /** npm package providing the grammar. Omitted for grammars vendored in `grammars/`. */
@@ -191,7 +221,8 @@ async function loadLanguageAsync(language: string): Promise<{ lang: any; wasm: b
     const entry = { lang: mod, wasm: false };
     languageCache.set(language, entry);
     return entry;
-  } catch {
+  } catch (e) {
+    noteWasmError(e);
     return null;
   }
 }

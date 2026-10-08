@@ -128,6 +128,8 @@ Reachability-heavy analyses (`cycles`, `reachability`, `path`, `impact`, `dead-c
 
 TS/JS calls also carry qualified-name hints when the receiver's class can be inferred (`CallsFact.calleeQN = "Class.method"`), and imports are resolved through `tsconfig.json` path aliases and the batch's file layout (`ImportsFact.resolved = "<repo-relative path>"`). Both surface as additive Prolog facts — `calls_qn/3` and `imports_resolved/3` — so back-compat queries over `calls/2` and `imports/3` keep working.
 
+`chiasmus_graph` and `chiasmus_map` run in a child process of the server, one call at a time (up to 32 more wait in a queue), so a large extraction never stalls the server's other tools. Cancelling a call, or a call running past `CHIASMUS_GRAPH_JOB_TIMEOUT_MS`, kills that process; the next graph call starts a fresh one. Set `CHIASMUS_GRAPH_WORKER=off` to run them inside the server process instead. They also run there once a language adapter has been registered in code with `registerAdapter()`, since such an adapter can't be handed to another process.
+
 ### Persistent cache and PR diff
 
 Pass `cache=true` on `chiasmus_graph` to enable a per-file content-hash cache — unchanged files skip re-parsing across calls. On a 42-file TypeScript repo, warm hits run at ~2.5ms vs ~170ms cold (60× speedup). Cache lives under `$CHIASMUS_CACHE_DIR` (default `~/.cache/chiasmus`) with an LRU budget per repo.
@@ -474,6 +476,9 @@ library.close();
 | `CHIASMUS_HOME` | `~/.chiasmus/` | Database, skill storage, and config |
 | `CHIASMUS_CACHE_DIR` | `~/.cache/chiasmus` | Per-file extraction cache + graph snapshots (when `cache=true`) |
 | `CHIASMUS_CACHE_MAX_PER_REPO` | `67108864` (64 MB) | Per-repo cache byte budget — LRU eviction above this |
+| `CHIASMUS_GRAPH_WORKER` | on | `0`/`off`/`false` runs `chiasmus_graph` and `chiasmus_map` in the server process instead of a child process |
+| `CHIASMUS_GRAPH_WORKER_HEAP_MB` | Node's default | V8 heap limit of the graph child process; an overrun fails the job and replaces the child, the server keeps running |
+| `CHIASMUS_GRAPH_JOB_TIMEOUT_MS` | `600000` (10 min) | A graph job running longer is killed and the graph child process replaced. Digits only (other values keep the default); capped at `2147483647` (about 24.8 days) |
 | `ANTHROPIC_API_KEY` | — | Optional: Anthropic provider for autonomous mode |
 | `DEEPSEEK_API_KEY` | — | Optional: DeepSeek provider for autonomous mode |
 | `OPENAI_API_KEY` | — | Optional: OpenAI provider for autonomous mode |

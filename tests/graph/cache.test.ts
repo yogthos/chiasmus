@@ -1,5 +1,6 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtemp, rm, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { existsSync, promises as fsp } from "node:fs";
+import { mkdir, mkdtemp, rm, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -351,5 +352,160 @@ describe("cache: concurrent access safety", () => {
     const { manifestPath } = resolveCachePaths(opts);
     const manifest = JSON.parse(await readFile(manifestPath, "utf-8"));
     expect(Object.keys(manifest.entries).length).toBe(10);
+  });
+});
+
+describe("cache: a write that died", () => {
+  let cacheDir: string;
+
+  beforeEach(async () => {
+    cacheDir = await mkdtemp(join(tmpdir(), "chiasmus-cache-dead-write-"));
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await rm(cacheDir, { recursive: true, force: true });
+  });
+
+  const small = (n: string) => ({ path: `/abs/${n}.ts`, content: n, graph: fragment(`/abs/${n}.ts`, n) });
+
+  /** The per-file entries on disk, and those the manifest lists. */
+  async function entries(opts: { cacheDir: string; repoKey: string }): Promise<{ onDisk: string[]; listed: string[] }> {
+    const { filesDir, manifestPath } = resolveCachePaths(opts);
+    const manifest = JSON.parse(await readFile(manifestPath, "utf-8"));
+    const listed = Object.values(manifest.entries as Record<string, { hash: string }>).map((e) => `${e.hash}.json`);
+    return { onDisk: (await readdir(filesDir)).sort(), listed: listed.sort() };
+  }
+
+  it.each([
+    ["deleted by a writer killed mid-eviction", true],
+    ["deleted from outside the cache", false],
+  ])("forgets entries the manifest lists but whose file was %s, so later saves go back to the fast path", async (_, killed) => {
+    const repo = { cacheDir, repoKey: "listed-but-gone" };
+    const { repoDir, filesDir } = resolveCachePaths(repo);
+    const big = (n: string) => ({ path: `/abs/${n}.ts`, content: n, graph: fragment(`/abs/${n}.ts`, "x".repeat(1_000)) });
+    await saveFileCache(["a", "b", "c", "d"].map(big), repo);
+    // A writer killed in eviction's unlink loop, before it rewrote the
+    // manifest, also leaves its marker.
+    if (killed) await writeFile(join(repoDir, ".write-in-progress"), "");
+    for (const n of ["a", "b"]) await rm(join(filesDir, `${fileHash(n, `/abs/${n}.ts`)}.json`));
+    // Two big entries and a few small ones fit; the four big ones the
+    // manifest lists do not.
+    const opts = { ...repo, maxBytesPerRepo: 2_600 };
+    await saveFileCache([small("e")], opts);
+    const after = await entries(opts);
+    expect(after.listed).toEqual(after.onDisk);
+    expect(after.onDisk).toHaveLength(3);
+    const readdirSpy = vi.spyOn(fsp, "readdir");
+    await saveFileCache([small("f")], opts);
+    expect(readdirSpy).not.toHaveBeenCalled();
+  });
+
+  it("keeps every listed entry when a reclaim can't read the manifest, and leaves the rest of the reclaim to the next writer", async () => {
+    const opts = { cacheDir, repoKey: "unreadable-manifest" };
+    const { repoDir, filesDir, manifestPath } = resolveCachePaths(opts);
+    const marker = join(repoDir, ".write-in-progress");
+    await saveFileCache(["a", "b"].map(small), opts);
+    // A dead writer's leftovers: its marker, a temp file and an entry no
+    // manifest lists.
+    const orphan = `${fileHash("gone", "/abs/gone.ts")}.json`;
+    await writeFile(marker, "");
+    await writeFile(join(filesDir, `${orphan}.tmp`), "{\"defi");
+    await writeFile(join(filesDir, orphan), "{}");
+    const realReadFile = fsp.readFile;
+    let failed = false;
+    vi.spyOn(fsp, "readFile").mockImplementation(async (path, ...rest) => {
+      if (!failed && String(path) === manifestPath) {
+        failed = true;
+        throw Object.assign(new Error("EMFILE: too many open files, open"), { code: "EMFILE" });
+      }
+      return realReadFile(path, ...rest);
+    });
+    await saveFileCache([small("c")], opts);
+    expect(failed).toBe(true);
+    const { hits } = await checkFileCache(["a", "b", "c"].map((n) => ({ path: `/abs/${n}.ts`, content: n })), opts);
+    expect(hits).toHaveLength(3);
+    expect((await readdir(filesDir)).filter((n) => n.endsWith(".tmp"))).toEqual([]);
+    expect((await readdir(filesDir))).toContain(orphan);
+    expect(existsSync(marker)).toBe(true);
+
+    await saveFileCache([small("d")], opts);
+    const after = await entries(opts);
+    expect(after.onDisk).toEqual(after.listed);
+    expect(after.listed).toHaveLength(4);
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it.each([
+    ["per-file entries", (repoDir: string) => join(repoDir, "files")],
+    ["snapshots", (repoDir: string) => join(repoDir, "snapshots")],
+  ])("keeps the marker when a reclaim can't list the %s directory, and the next save finishes the reclaim", async (_, dirOf) => {
+    const opts = { cacheDir, repoKey: "unlistable-dir" };
+    const { repoDir, filesDir } = resolveCachePaths(opts);
+    const marker = join(repoDir, ".write-in-progress");
+    const snapshots = join(repoDir, "snapshots");
+    await saveFileCache([small("a")], opts);
+    // A dead writer's leftovers: its marker and a temp file in each directory.
+    await writeFile(marker, "");
+    await writeFile(join(filesDir, "dead.json.tmp"), "{\"defi");
+    await mkdir(snapshots, { recursive: true });
+    await writeFile(join(snapshots, "dead.json.tmp"), "{\"nod");
+    const target = dirOf(repoDir);
+    const realReaddir = fsp.readdir;
+    let failed = false;
+    vi.spyOn(fsp, "readdir").mockImplementation((async (path: string, ...rest: unknown[]) => {
+      if (!failed && String(path) === target) {
+        failed = true;
+        throw Object.assign(new Error(`EIO: i/o error, scandir '${target}'`), { code: "EIO" });
+      }
+      return (realReaddir as (...a: unknown[]) => Promise<unknown>)(path, ...rest);
+    }) as typeof fsp.readdir);
+
+    await saveFileCache([small("b")], opts);
+
+    expect(failed).toBe(true);
+    expect(existsSync(marker)).toBe(true);
+    expect(existsSync(join(target, "dead.json.tmp"))).toBe(true);
+
+    vi.restoreAllMocks();
+    await saveFileCache([small("c")], opts);
+
+    expect(existsSync(marker)).toBe(false);
+    expect((await readdir(filesDir)).filter((n) => n.endsWith(".tmp"))).toEqual([]);
+    expect((await readdir(snapshots)).filter((n) => n.endsWith(".tmp"))).toEqual([]);
+  });
+
+  it("is reclaimed by the next save of any file, and only then is the cache directory listed", async () => {
+    const opts = { cacheDir, repoKey: "dead-write" };
+    const { filesDir, manifestPath } = resolveCachePaths(opts);
+    const realWriteFile = fsp.writeFile;
+    // A full disk cuts the first per-file entry off halfway.
+    let failed = false;
+    vi.spyOn(fsp, "writeFile").mockImplementation(async (path, data, ...rest) => {
+      if (!failed && String(path).startsWith(filesDir)) {
+        failed = true;
+        await realWriteFile(path, String(data).slice(0, 20));
+        throw Object.assign(new Error("ENOSPC: no space left on device, write"), { code: "ENOSPC" });
+      }
+      return realWriteFile(path, data, ...rest);
+    });
+    await expect(saveFileCache(
+      [{ path: "/abs/a.ts", content: "a", graph: fragment("/abs/a.ts", "a") }],
+      opts,
+    )).rejects.toThrow("ENOSPC");
+    expect((await readdir(filesDir)).some((n) => n.endsWith(".tmp"))).toBe(true);
+
+    const readdirSpy = vi.spyOn(fsp, "readdir");
+    await saveFileCache([{ path: "/abs/b.ts", content: "b", graph: fragment("/abs/b.ts", "b") }], opts);
+    const manifest = JSON.parse(await readFile(manifestPath, "utf-8"));
+    const listed = Object.values(manifest.entries as Record<string, { hash: string }>).map((e) => `${e.hash}.json`);
+    expect((await readdir(filesDir)).sort()).toEqual(listed.sort());
+    expect(listed).toEqual([`${fileHash("b", "/abs/b.ts")}.json`]);
+
+    // A save after a clean one does not list the directory: the eviction
+    // fast path (the manifest's sizes) still decides alone.
+    readdirSpy.mockClear();
+    await saveFileCache([{ path: "/abs/c.ts", content: "c", graph: fragment("/abs/c.ts", "c") }], opts);
+    expect(readdirSpy).not.toHaveBeenCalled();
   });
 });

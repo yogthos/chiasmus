@@ -6,6 +6,7 @@ import {
   getAdapterExtensions,
   clearAdapters,
   discoverAdapters,
+  hasCodeRegisteredAdapters,
 } from "../../src/graph/adapter-registry.js";
 import { extractGraph } from "../../src/graph/extractor.js";
 import { getLanguageForFile, getSupportedExtensions } from "../../src/graph/parser.js";
@@ -102,6 +103,16 @@ describe("adapter-registry", () => {
     clearAdapters();
     expect(getAdapter("test-lang")).toBeNull();
     expect(getAdapterExtensions()).toHaveLength(0);
+  });
+
+  it("tracks adapters registered in code (the graph child process cannot see them)", async () => {
+    expect(hasCodeRegisteredAdapters()).toBe(false);
+    await discoverAdapters();
+    expect(hasCodeRegisteredAdapters()).toBe(false);
+    registerAdapter(makeTestAdapter());
+    expect(hasCodeRegisteredAdapters()).toBe(true);
+    clearAdapters();
+    expect(hasCodeRegisteredAdapters()).toBe(false);
   });
 });
 

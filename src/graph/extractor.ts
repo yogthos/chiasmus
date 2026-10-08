@@ -1,4 +1,4 @@
-import { parseSource, parseSourceAsync, getLanguageForFile } from "./parser.js";
+import { parseSource, parseSourceAsync, getLanguageForFile, noteWasmError } from "./parser.js";
 import { walkScheme, walkCommonLisp, resolveCommonLispPackageCalls } from "./extract-sexp.js";
 import { getAdapter } from "./adapter-registry.js";
 import { checkFileCache, saveFileCache, type CacheOptions } from "./cache.js";
@@ -201,6 +201,17 @@ export async function extractGraph(
 }
 
 async function extractFileGraph(file: { path: string; content: string }): Promise<CodeGraph> {
+  try {
+    return await extractFileGraphUnguarded(file);
+  } catch (e) {
+    // A WASM trap here poisons this process's parser; the graph child reports
+    // the flag with the job's result and is replaced.
+    noteWasmError(e);
+    throw e;
+  }
+}
+
+async function extractFileGraphUnguarded(file: { path: string; content: string }): Promise<CodeGraph> {
   const defines: DefinesFact[] = [];
   const calls: CallsFact[] = [];
   const imports: ImportsFact[] = [];
