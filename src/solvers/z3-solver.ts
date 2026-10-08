@@ -9,6 +9,7 @@ import {
   type Z3_model,
   type Z3_solver,
 } from "z3-solver";
+import { abortError, isFatalWasmError, reportFatalSolverError, rethrowIfFatal } from "./fatal.js";
 import type { Solver, SolverInput, SolverResult } from "./types.js";
 
 type Z3Core = Awaited<ReturnType<typeof init>>["Z3"];
@@ -16,9 +17,37 @@ type Z3Core = Awaited<ReturnType<typeof init>>["Z3"];
 // Cache Z3 WASM initialization — it loads ~30MB, should only happen once.
 let z3Promise: ReturnType<typeof init> | null = null;
 
+// Set once the WASM module aborts or traps. Nothing may call into it after
+// that: its heap and locks are left mid-update, and calling back in can block
+// the event loop for good.
+let fatalError: Error | null = null;
+
+// Fails the check in flight (solves are serialized, so there is at most one).
+// An abort on check()'s pthread leaves Z3's promise pending forever; this ends
+// that solve, and with it the solves queued behind it.
+let failPendingCheck: ((e: Error) => void) | null = null;
+
+function markFatal(e: unknown): void {
+  if (fatalError) return;
+  fatalError = e instanceof Error ? e : new Error(String(e));
+  failPendingCheck?.(fatalError);
+  reportFatalSolverError("z3", fatalError);
+}
+
+function unavailable(error: Error): SolverResult {
+  return {
+    status: "error",
+    error: `Z3 is unavailable after a fatal WASM error (${error.message}); restart the process`,
+  };
+}
+
 function getZ3() {
   if (!z3Promise) {
-    z3Promise = init();
+    z3Promise = init({
+      // Emscripten calls this before unwinding an abort, from the main thread
+      // or proxied from a pthread, so the process can still exit cleanly.
+      onAbort: (what: unknown) => markFatal(abortError(what)),
+    });
   }
   return z3Promise;
 }
@@ -30,6 +59,7 @@ function getZ3() {
  */
 export async function z3AllocatedBytes(): Promise<number> {
   const z3 = await getZ3();
+  if (fatalError) throw fatalError;
   return Number(z3.Z3.get_estimated_alloc_size());
 }
 
@@ -73,6 +103,13 @@ function throwIfError(Z3: Z3Core, ctx: Z3_context): void {
   }
 }
 
+// Called from a catch, so the module is marked dead before the finally
+// blocks below run: a WASM failure during extraction must not call back into
+// it to release references.
+function markIfFatal(e: unknown): void {
+  if (isFatalWasmError(e)) markFatal(e);
+}
+
 function readUnsatCore(Z3: Z3Core, ctx: Z3_context, solver: Z3_solver): string[] {
   const core = Z3.solver_get_unsat_core(ctx, solver);
   throwIfError(Z3, ctx);
@@ -84,8 +121,11 @@ function readUnsatCore(Z3: Z3Core, ctx: Z3_context, solver: Z3_solver): string[]
       labels.push(Z3.ast_to_string(ctx, Z3.ast_vector_get(ctx, core, i)));
     }
     return labels;
+  } catch (e: unknown) {
+    markIfFatal(e);
+    throw e;
   } finally {
-    Z3.ast_vector_dec_ref(ctx, core);
+    if (!fatalError) Z3.ast_vector_dec_ref(ctx, core);
   }
 }
 
@@ -111,11 +151,17 @@ function evalConstant(
     Z3.inc_ref(ctx, value);
     try {
       return Z3.ast_to_string(ctx, value);
+    } catch (e: unknown) {
+      markIfFatal(e);
+      throw e;
     } finally {
-      Z3.dec_ref(ctx, value);
+      if (!fatalError) Z3.dec_ref(ctx, value);
     }
+  } catch (e: unknown) {
+    markIfFatal(e);
+    throw e;
   } finally {
-    Z3.dec_ref(ctx, app);
+    if (!fatalError) Z3.dec_ref(ctx, app);
   }
 }
 
@@ -140,8 +186,11 @@ function readModel(Z3: Z3Core, ctx: Z3_context, solver: Z3_solver): Record<strin
       assignments[name] = evalConstant(Z3, ctx, model, decl);
     }
     return assignments;
+  } catch (e: unknown) {
+    markIfFatal(e);
+    throw e;
   } finally {
-    Z3.model_dec_ref(ctx, model);
+    if (!fatalError) Z3.model_dec_ref(ctx, model);
   }
 }
 
@@ -159,8 +208,14 @@ async function checkSmtlib(
 
   let checkResult: Z3_lbool;
   try {
-    checkResult = await Z3.solver_check(ctx, solver);
+    checkResult = await new Promise<Z3_lbool>((resolve, reject) => {
+      failPendingCheck = reject;
+      Z3.solver_check(ctx, solver).then(resolve, reject);
+    }).finally(() => {
+      failPendingCheck = null;
+    });
   } catch (e: unknown) {
+    rethrowIfFatal(e);
     const msg = e instanceof Error ? e.message : String(e);
     return { status: "error", error: msg };
   }
@@ -168,7 +223,8 @@ async function checkSmtlib(
   if (checkResult === Z3_lbool.Z3_L_FALSE) {
     try {
       return { status: "unsat", unsatCore: readUnsatCore(Z3, ctx, solver) };
-    } catch {
+    } catch (e: unknown) {
+      rethrowIfFatal(e);
       return { status: "unsat", unsatCore: [] };
     }
   }
@@ -180,6 +236,7 @@ async function checkSmtlib(
   try {
     return { status: "sat", model: readModel(Z3, ctx, solver) };
   } catch (e: unknown) {
+    rethrowIfFatal(e);
     const msg = e instanceof Error ? e.message : String(e);
     return { status: "error", error: `Model extraction failed: ${msg}` };
   }
@@ -198,17 +255,31 @@ async function solveInFreshContext(Z3: Z3Core, smtlib: string): Promise<SolverRe
   const cfg = Z3.mk_config();
   const ctx = Z3.mk_context_rc(cfg);
   Z3.del_config(cfg);
+  let solver: Z3_solver | null = null;
   try {
     Z3.set_ast_print_mode(ctx, Z3_ast_print_mode.Z3_PRINT_SMTLIB2_COMPLIANT);
-    const solver = Z3.mk_solver(ctx);
+    solver = Z3.mk_solver(ctx);
     Z3.solver_inc_ref(ctx, solver);
-    try {
-      return await checkSmtlib(Z3, ctx, solver, smtlib);
-    } finally {
-      Z3.solver_dec_ref(ctx, solver);
-    }
+    return await checkSmtlib(Z3, ctx, solver, smtlib);
+  } catch (e: unknown) {
+    if (isFatalWasmError(e)) markFatal(e);
+    throw e;
   } finally {
-    Z3.del_context(ctx);
+    if (!fatalError) {
+      if (solver !== null) Z3.solver_dec_ref(ctx, solver);
+      Z3.del_context(ctx);
+    }
+  }
+}
+
+async function solveUnlessFatal(Z3: Z3Core, smtlib: string): Promise<SolverResult> {
+  if (fatalError) return unavailable(fatalError);
+  try {
+    return await solveInFreshContext(Z3, smtlib);
+  } catch (e: unknown) {
+    if (!isFatalWasmError(e)) throw e;
+    markFatal(e);
+    return { status: "error", error: e instanceof Error ? e.message : String(e) };
   }
 }
 
@@ -233,7 +304,7 @@ export async function createZ3Solver(): Promise<Solver> {
         return { status: "sat", model: {} };
       }
 
-      return runExclusive(() => solveInFreshContext(z3.Z3, smtlib));
+      return runExclusive(() => solveUnlessFatal(z3.Z3, smtlib));
     },
 
     dispose() {

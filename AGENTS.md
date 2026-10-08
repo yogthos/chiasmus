@@ -40,6 +40,7 @@ src/
 │   ├── session.ts         # SolverSession — factory for Z3/Prolog solver instances
 │   ├── z3-solver.ts       # Z3 WASM wrapper (z3-solver npm), auto-strips check-sat/get-model
 │   ├── prolog-solver.ts   # SWI-Prolog (prolog-wasm-full) wrapper, derivation tracing via assertz
+│   ├── fatal.ts           # Fatal WASM error (abort/trap) classification + entry-point exit handler
 │   └── correction-loop.ts # Bounded repair loop (delegates to repl-sandbox)
 ├── formalize/
 │   ├── engine.ts          # FormalizationEngine — template selection, LLM slot-filling, solve pipeline
@@ -341,6 +342,10 @@ Grammars are vendored WASM under `grammars/` — see `grammars/README.md` for pr
 - Prolog clauses must end with periods
 
 ### General
+- An Emscripten abort or WASM trap leaves a solver module unusable, and the next call into it can block the event loop forever. Z3 and Prolog then stop calling into it, report the error through `reportFatalSolverError`, and answer later solves with an error
+- Detect these with `isFatalWasmError` (`solvers/fatal.ts`): both throw `WebAssembly.RuntimeError`. Never match on message text — solver errors quote user input
+- Catch blocks around WASM module calls in `z3-solver.ts` / `prolog-solver.ts` must start with `rethrowIfFatal(e)`, so the error reaches the code that marks the module fatal (`markFatal`)
+- The CLI entry calls `exitOnFatalSolverError()` (log + `process.exit(1)`) so it gets restarted; the library never calls `process.exit`, and hosts can install their own handler with `setFatalSolverErrorHandler()`
 - `SolverSession.create()` is async (Z3 init) — always `await` it
 - `SkillLibrary.create()` is async (SQLite init) — always `await` it
 - Correction loop delegates to `repl-sandbox` package's generic `correctionLoop`
