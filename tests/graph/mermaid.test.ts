@@ -82,6 +82,48 @@ graph TD
       expect(prolog).toContain("edge(c, d).");
       expect(prolog).toContain("edge(d, e).");
     });
+
+    it("parses chained edges A --> B --> C", () => {
+      const prolog = parseMermaid("graph TD\n  A[Start] --> B -->|ok| C[End];");
+      expect(prolog).toContain("node(a, 'Start').");
+      expect(prolog).toContain("node(c, 'End').");
+      expect(prolog).toContain("edge(a, b).");
+      expect(prolog).toContain("edge(b, c).");
+      expect(prolog).toContain("edge_label(b, c, ok).");
+    });
+
+    it("parses text between the dashes as the edge label", () => {
+      const prolog = parseMermaid(`
+graph TD
+    A -- approve --> B
+    B == two words ==> C
+    C -. maybe .-> D
+      `);
+      expect(prolog).toContain("edge_label(a, b, approve).");
+      expect(prolog).toContain("edge_label(b, c, 'two words').");
+      expect(prolog).toContain("edge_label(c, d, maybe).");
+    });
+
+    it("links every node of an & group", () => {
+      const prolog = parseMermaid("graph TD\n  A & B --> C & D[Done]");
+      for (const edge of ["edge(a, c).", "edge(a, d).", "edge(b, c).", "edge(b, d)."]) {
+        expect(prolog).toContain(edge);
+      }
+      expect(prolog).toContain("node(d, 'Done').");
+    });
+
+    it("mixes chains, edge text and & groups on one line", () => {
+      const prolog = parseMermaid("graph TD\n  A -- go --> B & C --> D");
+      expect(prolog).toContain("edge_label(a, b, go).");
+      expect(prolog).toContain("edge_label(a, c, go).");
+      expect(prolog).toContain("edge(b, d).");
+      expect(prolog).toContain("edge(c, d).");
+    });
+
+    it("still skips lines that aren't edges", () => {
+      const prolog = parseMermaid("graph TD\n  A --> B -->\n  C -- text --> \n  D &\n  E[x --> F");
+      expect(prolog.match(/^edge\(/gm)).toBeNull();
+    });
   });
 
   describe("stateDiagram", () => {
@@ -159,6 +201,20 @@ graph TD
       }
     });
 
+    it.each([
+      ["a chain", "A --> B --> C", "reaches(a, c)."],
+      ["edge text", "A -- approve --> B\n    B --> C", "reaches(a, c)."],
+      ["an & group", "A --> B & C\n    C --> D", "reaches(a, d)."],
+    ])("reachability follows %s", async (_form, body, query) => {
+      const solver = createPrologSolver();
+      const result = await solver.solve({ type: "prolog", program: parseMermaid(`graph TD\n    ${body}`), query });
+      solver.dispose();
+      expect(result.status).toBe("success");
+      if (result.status === "success") {
+        expect(result.answers.length).toBeGreaterThan(0);
+      }
+    });
+
     it("state diagram output is valid Prolog", async () => {
       const prolog = parseMermaid(`
 stateDiagram-v2
@@ -200,11 +256,21 @@ stateDiagram-v2
       ["spaces before a broken state event", `[*] --> B :${" ".repeat(SPACES)}\rx\ry`],
       ["spaces inside a node label", `A[x${" ".repeat(SPACES)}x] --> B`],
       ["spaces inside a target label", `A --> B(x${" ".repeat(SPACES)}x)`],
+      ["a long chain", `A${" --> A".repeat(SPACES / 6)} !`],
+      ["spaces in edge text", `A --${" ".repeat(SPACES)}x`],
+      ["edge text that never closes", `A -- x${" -- x".repeat(SPACES / 5)}`],
+      ["a long & group", `A -->${" B &".repeat(SPACES / 4)} !`],
     ])("parses a line with %s in linear time", (_where, line) => {
       const header = line.startsWith("[*]") ? "stateDiagram-v2" : "flowchart TD";
       const started = performance.now();
       parseMermaid(`${header}\n${line}`);
       expect(performance.now() - started).toBeLessThan(500);
+    });
+
+    it("refuses an & link that would expand past the edge limit", () => {
+      const group = (name: string, size: number) => Array.from({ length: size }, (_, k) => `${name}${k}`).join(" & ");
+      expect(() => parseMermaid(`flowchart TD\n${group("a", 101)} --> ${group("b", 101)}`)).toThrow(/exceeds 10000 edges/);
+      expect(parseMermaid(`flowchart TD\n${group("a", 100)} --> ${group("b", 100)}`)).toContain("edge(a99, b99).");
     });
 
     // The pattern as it was: the scanner must accept exactly the same lines

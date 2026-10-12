@@ -197,34 +197,145 @@ export function matchFlowchartEdge(line: string): EdgeMatch | null {
   return rest ? [line, source, undefined, ...rest] : null;
 }
 
+/** A node in a flowchart statement: its ID and its raw label, if any. */
+type StatementNode = [id: string, label: string | undefined];
+
+/** Edges one link may expand to between two `&` groups. */
+const MAX_GROUP_EDGES = 10_000;
+
+const isLinkChar = (c: string | undefined) => c === "-" || c === "=" || c === ".";
+
+/**
+ * Matches the flowchart statements matchFlowchartEdge doesn't: chains
+ * (`A --> B --> C`), text between the dashes (`A -- text --> B`, also `==`
+ * and `-.`), and `&` groups (`A --> B & C`), whose every node links to every
+ * node across the arrow. Returns the edges as [source, edge label, target],
+ * or null if the whole line isn't such a statement. The line is scanned once,
+ * left to right, so its length can't stall the server the way the old edge
+ * pattern did.
+ */
+function matchFlowchartChain(line: string): [StatementNode, string | undefined, StatementNode][] | null {
+  const n = line.length;
+  let i = 0;
+  const skipWs = (j: number) => {
+    while (j < n && isWs(line.charCodeAt(j))) j++;
+    return j;
+  };
+
+  const node = (): StatementNode | null => {
+    const start = i;
+    while (i < n && isIdChar(line.charCodeAt(i))) i++;
+    if (i === start) return null;
+    const id = line.slice(start, i);
+    const open = skipWs(i);
+    if (open === n || !isOpen(line[open])) return [id, undefined];
+    // The label runs to its first closing bracket, and takes the ones right after it: `((x))`.
+    let end = open + 1;
+    while (end < n && !isClose(line[end])) end++;
+    if (end === n) return null;
+    while (end < n && isClose(line[end])) end++;
+    const label = line.slice(i, end);
+    i = end;
+    return [id, label];
+  };
+
+  const group = (): StatementNode[] | null => {
+    const members: StatementNode[] = [];
+    for (;;) {
+      const member = node();
+      if (!member) return null;
+      members.push(member);
+      const amp = skipWs(i);
+      if (line[amp] !== "&") return members;
+      i = skipWs(amp + 1);
+    }
+  };
+
+  // An arrow, `[-=.][-=.]+` and an optional head. `o` and `x` are heads only
+  // when no ID runs on from them: in `A --x B` it's a head, in `A --xB` the target.
+  const arrow = (): boolean => {
+    let k = i;
+    while (k < n && isLinkChar(line[k])) k++;
+    if (k - i < 2) return false;
+    if (line[k] === ">" || ((line[k] === "o" || line[k] === "x") && !(k + 1 < n && isIdChar(line.charCodeAt(k + 1))))) k++;
+    i = k;
+    return true;
+  };
+
+  // A link: `-- text -->`, or an arrow and an optional `|label|`.
+  const link = (): { label?: string } | null => {
+    i = skipWs(i);
+    if (line[i] !== "-" && line[i] !== "=") return null;
+    if (isLinkChar(line[i + 1]) && line[i + 2] !== undefined && isWs(line.charCodeAt(i + 2))) {
+      // The text ends at the first run of two link characters after a space.
+      const textStart = i + 2;
+      let k = textStart + 1;
+      while (k < n && !(isWs(line.charCodeAt(k - 1)) && isLinkChar(line[k]) && isLinkChar(line[k + 1]))) k++;
+      if (k === n) return null;
+      const label = line.slice(textStart, k);
+      i = k;
+      return arrow() ? { label } : null;
+    }
+    if (!arrow()) return null;
+    const bar = skipWs(i);
+    if (line[bar] !== "|") return {};
+    const close = line.indexOf("|", bar + 1);
+    if (close === -1) return null;
+    i = close + 1;
+    return { label: line.slice(bar + 1, close) };
+  };
+
+  const edges: [StatementNode, string | undefined, StatementNode][] = [];
+  let sources = group();
+  if (!sources) return null;
+  for (;;) {
+    const l = link();
+    if (!l) return null;
+    i = skipWs(i);
+    const targets = group();
+    if (!targets) return null;
+    if (sources.length * targets.length > MAX_GROUP_EDGES) {
+      throw new Error(`Mermaid link from ${sources.length} nodes to ${targets.length} exceeds ${MAX_GROUP_EDGES} edges`);
+    }
+    for (const s of sources) for (const t of targets) edges.push([s, l.label, t]);
+    sources = targets;
+    let end = skipWs(i);
+    if (line[end] === ";") end = skipWs(end + 1);
+    if (end === n) return edges;
+  }
+}
+
 function parseFlowchartLine(
   line: string,
   nodes: Map<string, MermaidNode>,
   edges: MermaidEdge[],
 ): void {
+  const addNode = ([id, rawLabel]: StatementNode): string => {
+    const norm = normalizeId(id);
+    const label = extractLabel(rawLabel);
+    if (!nodes.has(norm)) {
+      nodes.set(norm, { id: norm, label });
+    } else if (label && !nodes.get(norm)!.label) {
+      nodes.get(norm)!.label = label;
+    }
+    return norm;
+  };
+
   // More permissive than Mermaid: extract source, arrow+label, target
   const parts = matchFlowchartEdge(line);
-  if (!parts) return;
-
-  const [, srcId, srcLabel, , edgeLabel, tgtId, tgtLabel] = parts;
-
-  const srcNorm = normalizeId(srcId);
-  const tgtNorm = normalizeId(tgtId);
-
-  // Register nodes
-  if (!nodes.has(srcNorm)) {
-    nodes.set(srcNorm, { id: srcNorm, label: extractLabel(srcLabel) });
-  } else if (extractLabel(srcLabel) && !nodes.get(srcNorm)!.label) {
-    nodes.get(srcNorm)!.label = extractLabel(srcLabel);
+  if (parts) {
+    const [, srcId, srcLabel, , edgeLabel, tgtId, tgtLabel] = parts;
+    const from = addNode([srcId, srcLabel]);
+    const to = addNode([tgtId, tgtLabel]);
+    edges.push({ from, to, label: edgeLabel?.trim() });
+    return;
   }
 
-  if (!nodes.has(tgtNorm)) {
-    nodes.set(tgtNorm, { id: tgtNorm, label: extractLabel(tgtLabel) });
-  } else if (extractLabel(tgtLabel) && !nodes.get(tgtNorm)!.label) {
-    nodes.get(tgtNorm)!.label = extractLabel(tgtLabel);
+  for (const [src, edgeLabel, tgt] of matchFlowchartChain(line) ?? []) {
+    const from = addNode(src);
+    const to = addNode(tgt);
+    edges.push({ from, to, label: edgeLabel?.trim() });
   }
-
-  edges.push({ from: srcNorm, to: tgtNorm, label: edgeLabel?.trim() });
 }
 
 /**
