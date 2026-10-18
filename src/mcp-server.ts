@@ -286,7 +286,7 @@ The calling LLM designs the template — no API key needed. Describe your proble
 After creation, the template appears in chiasmus_skills and chiasmus_formalize.
 
 Validation: checks slot/skeleton consistency, required fields, name uniqueness.
-Optional: set test=true with an example to run it through the solver.`,
+Optional: set test=true with an example to run it through the solver first. If the solver reports an error for the example, nothing is stored and errors carries its message; any other result (sat, unsat, unknown, Prolog answers or none) is stored and reported in testResult.`,
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -347,7 +347,7 @@ Optional: set test=true with an example to run it through the solver.`,
         },
         test: {
           type: "boolean",
-          description: "If true and example provided, run example through solver to validate (default: false)",
+          description: "If true and example provided, run example through solver first; a solver error stores nothing (default: false)",
         },
       },
       required: ["name", "domain", "solver", "signature", "skeleton", "slots", "normalizations"],
