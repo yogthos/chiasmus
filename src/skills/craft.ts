@@ -114,7 +114,7 @@ export function validateTemplate(input: CraftInput, library: SkillLibrary): stri
   return errors;
 }
 
-/** Validate and add a template to the library. Optionally test the example. */
+/** Validate and add a template to the library. Optionally test the example first; a solver error for it adds nothing. */
 export async function craftTemplate(
   input: CraftInput,
   library: SkillLibrary,
@@ -142,6 +142,7 @@ export async function craftTemplate(
   // Optional: test the example through the solver
   let tested = false;
   let testResult: string | undefined;
+  let testError: string | undefined;
 
   if (input.test && input.example) {
     tested = true;
@@ -153,12 +154,26 @@ export async function craftTemplate(
           : buildPrologInput(input.example);
         const result = await session.solve(solverInput);
         testResult = result.status;
+        if (result.status === "error") testError = result.error.trim();
       } finally {
         session.dispose();
       }
     } catch (e: unknown) {
-      testResult = `error: ${e instanceof Error ? e.message : String(e)}`;
+      testError = e instanceof Error ? e.message : String(e);
+      testResult = `error: ${testError}`;
     }
+  }
+
+  // No tool removes a stored template, so one whose example the solver could
+  // not run is refused rather than stored unchecked. unsat, unknown and a
+  // Prolog query without answers are stored: an example may show that case.
+  if (testError !== undefined) {
+    return {
+      created: false,
+      tested,
+      testResult,
+      errors: [`Example test failed, so the template was not stored: ${testError}`],
+    };
   }
 
   const added = library.addTemplate(template);
