@@ -1,6 +1,7 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { validateTemplate, craftTemplate } from "../src/skills/craft.js";
 import { SkillLibrary } from "../src/skills/library.js";
+import { SolverSession } from "../src/solvers/session.js";
 import type { CraftInput } from "../src/skills/craft.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -23,6 +24,19 @@ function validInput(overrides: Partial<CraftInput> = {}): CraftInput {
     ],
     ...overrides,
   };
+}
+
+function prologInput(example: string): CraftInput {
+  return validInput({
+    solver: "prolog",
+    skeleton: "{{SLOT:facts}}\n{{SLOT:rules}}",
+    slots: [
+      { name: "facts", description: "Facts", format: "parent(tom, bob)." },
+      { name: "rules", description: "Rules", format: "ancestor(X,Y) :- parent(X,Y)." },
+    ],
+    example,
+    test: true,
+  });
 }
 
 describe("validateTemplate", () => {
@@ -137,6 +151,7 @@ describe("craftTemplate", () => {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     library?.close();
     await rm(tempDir, { recursive: true, force: true });
   });
@@ -166,15 +181,76 @@ describe("craftTemplate", () => {
     expect(result.testResult).toBe("sat");
   });
 
-  it("template with test=true and broken example returns error but still creates", async () => {
+  it("template with test=true and broken example is refused with the solver's message and stores nothing", async () => {
     const result = await craftTemplate(validInput({
       example: `(declare-const x Int) (assert (> x "bad"))`,
       test: true,
     }), library);
 
-    expect(result.created).toBe(true);
+    expect(result.created).toBe(false);
     expect(result.tested).toBe(true);
     expect(result.testResult).toBe("error");
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors![0]).toContain("not stored");
+    expect(result.errors![0]).toContain("Sort mismatch");
+    expect(library.get("test-template")).toBeNull();
+
+    library.close();
+    library = await SkillLibrary.create(tempDir);
+    expect(library.get("test-template")).toBeNull();
+
+    // Nothing holds the name, so the fixed example goes in under it.
+    const fixed = await craftTemplate(validInput({
+      example: `(declare-const x Int) (assert (> x 0))`,
+      test: true,
+    }), library);
+    expect(fixed.created).toBe(true);
+    expect(fixed.testResult).toBe("sat");
+  });
+
+  it("template with test=true and a Prolog example the solver errors on is refused", async () => {
+    const result = await craftTemplate(prologInput("parent(tom, bob).\n?- ancestor(tom, X)."), library);
+
+    expect(result.created).toBe(false);
+    expect(result.testResult).toBe("error");
+    expect(result.errors![0]).toContain("existence_error");
+    expect(library.get("test-template")).toBeNull();
+  });
+
+  it("template with test=true is refused when the solver session cannot start", async () => {
+    vi.spyOn(SolverSession, "create").mockRejectedValueOnce(new Error("solver unavailable"));
+
+    const result = await craftTemplate(validInput({
+      example: `(declare-const x Int) (assert (> x 0))`,
+      test: true,
+    }), library);
+
+    expect(result.created).toBe(false);
+    expect(result.tested).toBe(true);
+    expect(result.testResult).toBe("error: solver unavailable");
+    expect(result.errors![0]).toContain("solver unavailable");
+    expect(library.get("test-template")).toBeNull();
+  });
+
+  // An example may show the no-conflict or no-path case on purpose, so only
+  // an example the solver could not run is refused.
+  it("template with test=true and an unsat example is stored", async () => {
+    const result = await craftTemplate(validInput({
+      example: `(declare-const x Int) (assert (> x 0)) (assert (< x 0))`,
+      test: true,
+    }), library);
+
+    expect(result.created).toBe(true);
+    expect(result.testResult).toBe("unsat");
+    expect(library.get("test-template")).not.toBeNull();
+  });
+
+  it("template with test=true and a Prolog query without answers is stored", async () => {
+    const result = await craftTemplate(prologInput("parent(tom, bob).\n?- parent(bob, tom)."), library);
+
+    expect(result.created).toBe(true);
+    expect(result.testResult).toBe("success");
+    expect(library.get("test-template")).not.toBeNull();
   });
 
   it("template with test=true and valid Prolog example runs solver", async () => {
