@@ -23,6 +23,11 @@ import { join } from "node:path";
 import lockfile from "proper-lockfile";
 import type { CodeGraph } from "./types.js";
 
+// "6" package-qualifies Go names (`<pkg dir>.Type.Method`); Go entries
+// also depend on the nearest go.mod.
+// shortcut: changing go.mod's module path doesn't invalidate cached Go files;
+// fold the module path into the content hash if that bites.
+// "5" introduced CodeGraph._goInfo and `Type.Method` names for Go methods.
 // "3" introduced CodeGraph._typeInfo (per-file class fields + pending calls)
 // and CallsFact.calleeQN for qualified-name call resolution; "2" caches
 // would still work but produce no QN until files naturally re-extract, so
@@ -30,7 +35,7 @@ import type { CodeGraph } from "./types.js";
 // "2" introduced FileNode.fileDoc/tokenEstimate/lineCount and
 // DefinesFact.signature; "1" caches lack these fields and would render as
 // partial maps until naturally invalidated by content change.
-export const CACHE_SCHEMA_VERSION = "4";
+export const CACHE_SCHEMA_VERSION = "6";
 
 const DEFAULT_MAX_BYTES_PER_REPO = 64 * 1024 * 1024; // 64 MB
 

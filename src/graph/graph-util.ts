@@ -9,9 +9,10 @@ import type { CodeGraph } from "./types.js";
 
 /**
  * Separators languages use between a namespace and a name: `/` for Clojure
- * (`my.ns/fn`), `:` for Common Lisp (`my-package:fn`).
+ * (`my.ns/fn`), `:` for Common Lisp (`my-package:fn`), `.` for Go
+ * (`internal/store.Type.Method`).
  */
-const NAMESPACE_SEPARATORS = ["/", ":"] as const;
+const NAMESPACE_SEPARATORS = ["/", ":", "."] as const;
 
 /**
  * Resolve a user-supplied name to every matching node in the graph.
@@ -19,26 +20,31 @@ const NAMESPACE_SEPARATORS = ["/", ":"] as const;
  * Languages that emit namespace-qualified names store defines as `my.ns/fn`
  * or `my-package:fn`, but a user asking for `callers` of `fn` means it
  * regardless of namespace. We match:
- *   1. exact name — fast path for languages that use bare names
- *   2. any `<ns>/name` or `<package>:name` suffix — a user typing
- *      `from-input-stream` gets every `toda.hash/from-input-stream`,
- *      `toda.packet/from-input-stream`, etc.
+ *   1. a bare name: exact, plus any `<ns>/name`, `<package>:name` or
+ *      `<pkg>.Type.name` suffix — `from-input-stream` gets every
+ *      `toda.hash/from-input-stream`, `Get` every Go `*.Get` method.
+ *   2. a dotted name (Go): exact, plus any node ending in `.name` or `/name`,
+ *      so `Store.Get` and `snapshot.Store.Get` find `internal/snapshot.Store.Get`.
  *
- * A name that already carries a separator is treated as fully qualified and
- * only matched exactly. Returns an empty array when nothing matches, so
- * callers can short-circuit.
+ * A name containing `/` or `:` is treated as fully qualified and only
+ * matched exactly. Returns an empty array when nothing matches, so callers
+ * can short-circuit.
  */
 export function resolveSymbolNames(graph: CodeGraph, name: string): string[] {
   const allNames = collectNodes(graph);
-  if (allNames.has(name)) return [name];
-  if (NAMESPACE_SEPARATORS.some((sep) => name.includes(sep))) return [];
-
-  const suffixes = NAMESPACE_SEPARATORS.map((sep) => `${sep}${name}`);
-  const matches: string[] = [];
+  const exact = allNames.has(name);
+  if (name.includes("/") || name.includes(":")) return exact ? [name] : [];
+  const suffixes = (name.includes(".") ? ["/", "."] : NAMESPACE_SEPARATORS).map((sep) => `${sep}${name}`);
+  const matches: string[] = exact ? [name] : [];
   for (const n of allNames) {
-    if (suffixes.some((suffix) => n.endsWith(suffix))) matches.push(n);
+    if (n !== name && suffixes.some((suffix) => n.endsWith(suffix))) matches.push(n);
   }
   return matches;
+}
+
+/** Collapse whitespace so multi-line signatures stay one line. */
+export function collapseSignature(s: string): string {
+  return s.replace(/\s+/g, " ").trim();
 }
 
 /** Every node that appears in defines or as a call endpoint. */

@@ -160,7 +160,7 @@ New normalization patterns discovered during use get saved back to the template,
 | `chiasmus_craft` | Create a new template (LLM-designed, validated server-side) | No |
 | `chiasmus_skills` | Search/list templates in the skill library | No |
 | `chiasmus_lint` | Fast structural validation without running the solver | No |
-| `chiasmus_graph` | Source-code call-graph analysis (16 analyses incl. communities, hubs, bridges, diff, entry-points). TS/JS emits `calleeQN` + `imports.resolved` when inferable. | No |
+| `chiasmus_graph` | Source-code call-graph analysis (16 analyses incl. communities, hubs, bridges, diff, entry-points). TS/JS emits `calleeQN` + `imports.resolved` when inferable. Go names are package-qualified (`<pkg dir>.Type.Method`) and receiver/interface calls are resolved (`go.ts`). | No |
 | `chiasmus_map` | Pre-built codebase outline for pre-read agent context (overview / file / symbol) | No |
 | `chiasmus_search` | Semantic code search over a file set (embeddings + cosine similarity) | Embedding† |
 | `chiasmus_review` | Phased code-review recipe with optional PR-delta scope | No |

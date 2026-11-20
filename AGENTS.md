@@ -65,6 +65,7 @@ src/
 │   ├── parser.ts          # tree-sitter lang registry + sync/async parse for TS/JS/Py/Go/Rust/Clojure/Scheme/Racket/CL
 │   ├── extractor.ts       # AST walking + per-language call graph extraction + TS/JS collectTypeInfo
 │   ├── extract-sexp.ts    # Scheme/Racket + Common Lisp extraction (scope-aware s-expression walkers)
+│   ├── go.ts              # Go extraction (package-qualified `<pkg dir>.Type.Method` names) + project-wide receiver/interface call resolution
 │   ├── facts.ts           # graphToProlog — CodeGraph → Prolog facts (incl. calls_qn/3, imports_resolved/3)
 │   ├── analyses.ts        # runAnalysis — dispatches all graph analyses
 │   ├── native-analyses.ts # O(V+E) cycles/reachability/impact/dead-code/callers/callees
@@ -276,7 +277,8 @@ Data sources (added to `CodeGraph` for this feature):
 - `DefinesFact.signature` — params + return type (TS/JS/Python/Go/Rust); arglist vector for Clojure `defn` and `defprotocol`/`definterface` methods; arglist for Scheme `define` and Common Lisp `defun`.
 - TypeScript exports now also include `interface`, `type`, and `enum` declarations, so `exportCount` reflects the full public surface.
 - `FileNode.namespace` — the file's `(in-package ...)` for Common Lisp; drives cross-file package resolution. Unset for every other language.
-- Cache schema is currently `"4"` (bumped when `FileNode.namespace` landed). Older caches auto-invalidate on upgrade.
+- Cache schema is currently `"6"` (bumped when Go names became package-qualified, `<pkg dir>.Type.Method`, with `CodeGraph._goInfo`). Older caches auto-invalidate on upgrade. Cached Go entries also depend on the nearest `go.mod`, which the content hash doesn't cover: a changed module path needs the cache cleared.
+- Graph snapshots saved before schema `"6"` diff every Go symbol as removed/added (bare `f`/`Method` → `<pkg dir>.f`/`<pkg dir>.Type.Method`).
 
 ### TS/JS qualified-name resolution
 
