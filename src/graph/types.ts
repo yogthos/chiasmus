@@ -141,6 +141,34 @@ export interface CodeGraph {
   hyperedges?: Hyperedge[];
   /** Internal: per-file type info for 2-pass QN resolution. */
   _typeInfo?: FileTypeInfo[];
+  /** Internal: per-file Go type info for project-wide method resolution. */
+  _goInfo?: GoFileInfo[];
+}
+
+/** Per-file Go type info, merged project-wide to resolve receiver calls. */
+export interface GoFileInfo {
+  file: string;
+  /** Package key: dir relative to go.mod (`internal/store`), else the package clause name. */
+  pkg: string;
+  /** Package-level var → qualified type key ("" when unknown). */
+  pkgVars: Record<string, string>;
+  /** Struct type → { fieldName → qualified type key }. Embedded fields keyed by simple type name. */
+  structFields: Array<{ typeName: string; fields: Record<string, string> }>;
+  /** `embeds`: the interface embeds other types, so its full method set is unknown. */
+  interfaces: Array<{ name: string; methods: string[]; embeds?: boolean }>;
+  pendingCalls: GoPendingCall[];
+}
+
+/** A `recv.a.b.Method()` call waiting for its receiver type. */
+export interface GoPendingCall {
+  caller: string;
+  method: string;
+  /** Qualified type of the chain's head variable; "" when unknown. */
+  headType: string;
+  /** Head that is neither a local nor an import: a package var, or an unguessed package name. */
+  headVar?: string;
+  /** Field names walked from the head to the receiver. */
+  path: string[];
 }
 
 /** User-provided language adapter for custom tree-sitter grammars */

@@ -2,7 +2,9 @@ import { parseSource, parseSourceAsync, getLanguageForFile, noteWasmError } from
 import { walkScheme, walkCommonLisp, resolveCommonLispPackageCalls } from "./extract-sexp.js";
 import { getAdapter } from "./adapter-registry.js";
 import { checkFileCache, saveFileCache, type CacheOptions } from "./cache.js";
-import type { CodeGraph, DefinesFact, CallsFact, ImportsFact, ExportsFact, ContainsFact, FileNode, FileTypeInfo, PendingCall } from "./types.js";
+import type { CodeGraph, DefinesFact, CallsFact, ImportsFact, ExportsFact, ContainsFact, FileNode, FileTypeInfo, GoFileInfo, PendingCall } from "./types.js";
+import { walkGo, resolveGoCalls, resetGoModCache } from "./go.js";
+import { collapseSignature } from "./graph-util.js";
 import { extractClassFields, extractSimpleTypeName } from "./type-env.js";
 import { buildClassFieldRegistry, resolveCallsWithRegistry } from "./resolve-calls.js";
 import { loadTsconfigAliases, EMPTY_TSCONFIG_ALIASES, type TsconfigAliasMap } from "./tsconfig-aliases.js";
@@ -144,6 +146,7 @@ export async function extractGraph(
   // web-tree-sitter's WASM heap at once. Extraction is CPU-bound on this
   // thread, so running files concurrently gains nothing.
   const fresh: Array<{ path: string; content: string; graph: CodeGraph }> = [];
+  resetGoModCache();
   for (const file of toExtract) {
     fresh.push({ path: file.path, content: file.content, graph: await extractFileGraph(file) });
   }
@@ -162,6 +165,7 @@ export async function extractGraph(
   const contains: ContainsFact[] = [];
   const fileNodes = new Map<string, FileNode>();
   const allTypeInfo: FileTypeInfo[] = [];
+  const allGoInfo: GoFileInfo[] = [];
 
   // Append element by element: `push(...xs)` passes one argument per fact and
   // overflows the stack once a single file has ~125k of them.
@@ -173,6 +177,7 @@ export async function extractGraph(
     for (const c of p.contains) contains.push(c);
     for (const fn of p.files ?? []) if (!fileNodes.has(fn.path)) fileNodes.set(fn.path, fn);
     for (const t of p._typeInfo ?? []) allTypeInfo.push(t);
+    for (const g of p._goInfo ?? []) allGoInfo.push(g);
   }
 
   const merged: CodeGraph = { defines, calls, imports, exports, contains, files: [...fileNodes.values()] };
@@ -185,6 +190,8 @@ export async function extractGraph(
     const registry = buildClassFieldRegistry(allTypeInfo);
     resolveCallsWithRegistry(merged, registry);
   }
+
+  if (allGoInfo.length > 0) resolveGoCalls(merged, allGoInfo);
 
   // Common Lisp packages span files, so a bare callee can only be matched
   // against sibling defines once the whole batch is merged.
@@ -239,10 +246,11 @@ async function extractFileGraphUnguarded(file: { path: string; content: string }
   if (!tree) return { defines, calls, imports, exports, contains, files };
 
   let typeInfo: FileTypeInfo | undefined;
+  let goInfo: GoFileInfo | undefined;
   try {
     const doc = extractFileDoc(tree.rootNode, lang);
     if (doc) fileNode.fileDoc = doc;
-    extractFromTree(tree, file.path, lang, defines, calls, imports, exports, contains, callSet, fileNode);
+    goInfo = extractFromTree(tree, file.path, lang, defines, calls, imports, exports, contains, callSet, fileNode);
     // Collect receiver-chain + class-field type info for TS/JS. Lets a
     // later project-wide pass fill `calleeQN` on matching CallsFacts.
     // Wrap in try/catch so an unexpected AST shape never sinks the main
@@ -262,6 +270,7 @@ async function extractFileGraphUnguarded(file: { path: string; content: string }
   }
   const result: CodeGraph = { defines, calls, imports, exports, contains, files };
   if (typeInfo) result._typeInfo = [typeInfo];
+  if (goInfo) result._goInfo = [goInfo];
   return result;
 }
 
@@ -402,14 +411,6 @@ function stripPythonStringQuotes(text: string): string {
   return text;
 }
 
-/**
- * Collapse whitespace in a raw signature snippet so multi-line parameter
- * lists don't blow up the serialized DefinesFact. Exported for adapter use.
- */
-function collapseSignature(s: string): string {
-  return s.replace(/\s+/g, " ").trim();
-}
-
 function extractFromTree(
   tree: any,
   filePath: string,
@@ -421,7 +422,7 @@ function extractFromTree(
   contains: ContainsFact[],
   callSet: Set<string>,
   fileNode: FileNode,
-): void {
+): GoFileInfo | undefined {
   const adapter = getAdapter(lang);
   if (adapter) {
     const partial = adapter.extract(tree.rootNode, filePath);
@@ -443,7 +444,7 @@ function extractFromTree(
     const scopeStack: string[] = [];
     walkPython(tree.rootNode, filePath, scopeStack, defines, calls, imports, exports, contains, callSet);
   } else if (lang === "go") {
-    walkGo(tree.rootNode, filePath, defines, calls, imports, exports, contains, callSet);
+    return walkGo(tree.rootNode, filePath, defines, calls, imports, exports, contains, callSet);
   } else if (lang === "rust") {
     walkRust(tree.rootNode, filePath, null, defines, calls, imports, exports, contains, callSet);
   } else {
@@ -1005,185 +1006,6 @@ function findPythonEnclosingClass(node: any): string | null {
       continue;
     }
     current = current.parent;
-  }
-  return null;
-}
-
-// ── Go extraction ───────────────────────────────────────────────────
-
-function walkGo(
-  rootNode: any,
-  filePath: string,
-  defines: DefinesFact[],
-  calls: CallsFact[],
-  imports: ImportsFact[],
-  exports: ExportsFact[],
-  contains: ContainsFact[],
-  callSet: Set<string>,
-): void {
-  for (let i = 0; i < rootNode.childCount; i++) {
-    const node = rootNode.child(i);
-    const type: string = node.type;
-
-    switch (type) {
-      case "function_declaration": {
-        const name = node.childForFieldName("name")?.text;
-        if (name) {
-          defines.push({
-            file: filePath, name, kind: "function",
-            line: node.startPosition.row + 1,
-            signature: extractGoSignature(node),
-          });
-          if (/^[A-Z]/.test(name)) {
-            exports.push({ file: filePath, name });
-          }
-          extractGoCalls(node.childForFieldName("body"), name, calls, callSet);
-        }
-        break;
-      }
-
-      case "method_declaration": {
-        const name = node.childForFieldName("name")?.text;
-        if (name) {
-          defines.push({
-            file: filePath, name, kind: "method",
-            line: node.startPosition.row + 1,
-            signature: extractGoSignature(node),
-          });
-          // Extract receiver type for contains relationship
-          const receiver = node.childForFieldName("receiver");
-          const receiverType = extractGoReceiverType(receiver);
-          if (receiverType) {
-            contains.push({ parent: receiverType, child: name });
-          }
-          if (/^[A-Z]/.test(name)) {
-            exports.push({ file: filePath, name });
-          }
-          extractGoCalls(node.childForFieldName("body"), name, calls, callSet);
-        }
-        break;
-      }
-
-      case "type_declaration": {
-        // type Foo struct { ... } or type Foo interface { ... }
-        for (let j = 0; j < node.childCount; j++) {
-          const spec = node.child(j);
-          if (spec.type === "type_spec") {
-            const name = spec.childForFieldName("name")?.text;
-            const typeNode = spec.childForFieldName("type");
-            if (name && typeNode) {
-              const kind = typeNode.type === "interface_type" ? "interface" : "class";
-              defines.push({ file: filePath, name, kind, line: node.startPosition.row + 1 });
-              if (/^[A-Z]/.test(name)) {
-                exports.push({ file: filePath, name });
-              }
-            }
-          }
-        }
-        break;
-      }
-
-      case "import_declaration": {
-        for (let j = 0; j < node.childCount; j++) {
-          const child = node.child(j);
-          if (child.type === "import_spec_list") {
-            for (let k = 0; k < child.childCount; k++) {
-              const spec = child.child(k);
-              if (spec.type === "import_spec") {
-                const pathNode = spec.children.find((c: any) => c.type === "interpreted_string_literal");
-                if (pathNode) {
-                  const source = pathNode.text.slice(1, -1); // strip quotes
-                  const name = source.split("/").pop() ?? source;
-                  imports.push({ file: filePath, name, source });
-                }
-              }
-            }
-          }
-          // Single import without parens
-          if (child.type === "import_spec") {
-            const pathNode = child.children.find((c: any) => c.type === "interpreted_string_literal");
-            if (pathNode) {
-              const source = pathNode.text.slice(1, -1);
-              const name = source.split("/").pop() ?? source;
-              imports.push({ file: filePath, name, source });
-            }
-          }
-        }
-        break;
-      }
-    }
-  }
-}
-
-/** Recursively extract call_expression nodes from a Go function body */
-function extractGoCalls(
-  node: any,
-  caller: string,
-  calls: CallsFact[],
-  callSet: Set<string>,
-): void {
-  if (!node) return;
-
-  for (let i = 0; i < node.childCount; i++) {
-    const child = node.child(i);
-
-    if (child.type === "call_expression") {
-      const callee = resolveGoCallee(child);
-      if (callee) {
-        const key = `${caller}->${callee}`;
-        if (!callSet.has(key)) {
-          callSet.add(key);
-          calls.push({ caller, callee });
-        }
-      }
-    }
-
-    extractGoCalls(child, caller, calls, callSet);
-  }
-}
-
-/** Resolve callee name from a Go call_expression */
-function resolveGoCallee(callNode: any): string | null {
-  const fnNode = callNode.childForFieldName("function");
-  if (!fnNode) return null;
-
-  switch (fnNode.type) {
-    case "identifier":
-      return fnNode.text;
-
-    case "selector_expression": {
-      // pkg.Func() or obj.Method() → extract the field (right side)
-      const field = fnNode.childForFieldName("field");
-      return field?.text ?? null;
-    }
-
-    default:
-      return null;
-  }
-}
-
-/** Extract the receiver type name from a Go method receiver */
-function extractGoReceiverType(receiver: any): string | null {
-  if (!receiver) return null;
-  // receiver is parameter_list: (a *Animal) or (a Animal)
-  for (let i = 0; i < receiver.childCount; i++) {
-    const param = receiver.child(i);
-    if (param.type === "parameter_declaration") {
-      const typeNode = param.childForFieldName("type");
-      if (!typeNode) continue;
-      // Could be pointer_type (*Animal) or type_identifier (Animal)
-      if (typeNode.type === "pointer_type") {
-        // First child after * is the type identifier
-        for (let j = 0; j < typeNode.childCount; j++) {
-          if (typeNode.child(j).type === "type_identifier") {
-            return typeNode.child(j).text;
-          }
-        }
-      }
-      if (typeNode.type === "type_identifier") {
-        return typeNode.text;
-      }
-    }
   }
   return null;
 }
@@ -2141,20 +1963,6 @@ function extractPythonSignature(node: any): string | undefined {
   let sig = params.text;
   const ret = node.childForFieldName("return_type");
   if (ret) sig += " -> " + ret.text;
-  return collapseSignature(sig);
-}
-
-/**
- * Extract signature from a Go function_declaration or method_declaration:
- * parameters plus result type (tree-sitter-go's `result` field). Excludes
- * the receiver — that relationship is already captured in `contains`.
- */
-function extractGoSignature(node: any): string | undefined {
-  const params = node.childForFieldName("parameters");
-  if (!params) return undefined;
-  let sig = params.text;
-  const result = node.childForFieldName("result");
-  if (result) sig += " " + result.text;
   return collapseSignature(sig);
 }
 

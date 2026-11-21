@@ -319,7 +319,7 @@ describe("extractor: signatures on exported defines", () => {
         content: "package p\nfunc Foo(x int, y string) bool { return true }\n",
       },
     ]);
-    const foo = graph.defines.find((d) => d.name === "Foo");
+    const foo = graph.defines.find((d) => d.name === "p.Foo");
     expect(foo?.signature).toMatch(/x\s+int/);
   });
 

@@ -432,8 +432,8 @@ func validate() {}
     }]);
 
     const names = graph.defines.map((d) => d.name);
-    expect(names).toContain("handleRequest");
-    expect(names).toContain("validate");
+    expect(names).toContain("main.handleRequest");
+    expect(names).toContain("main.validate");
     expect(graph.defines.every((d) => d.kind === "function")).toBe(true);
   });
 
@@ -457,18 +457,18 @@ func (a Animal) Greet() string {
 `,
     }]);
 
-    const structDef = graph.defines.find((d) => d.name === "Animal");
+    const structDef = graph.defines.find((d) => d.name === "main.Animal");
     expect(structDef).toBeDefined();
     expect(structDef!.kind).toBe("class");
 
     const methods = graph.defines.filter((d) => d.kind === "method");
     const methodNames = methods.map((m) => m.name);
-    expect(methodNames).toContain("Speak");
-    expect(methodNames).toContain("Greet");
+    expect(methodNames).toContain("main.Animal.Speak");
+    expect(methodNames).toContain("main.Animal.Greet");
 
     const containsPairs = graph.contains.map((c) => `${c.parent}->${c.child}`);
-    expect(containsPairs).toContain("Animal->Speak");
-    expect(containsPairs).toContain("Animal->Greet");
+    expect(containsPairs).toContain("main.Animal->main.Animal.Speak");
+    expect(containsPairs).toContain("main.Animal->main.Animal.Greet");
   });
 
   it("extracts call relationships", async () => {
@@ -490,9 +490,9 @@ func main() {
     }]);
 
     const callPairs = graph.calls.map((c) => `${c.caller}->${c.callee}`);
-    expect(callPairs).toContain("greet->Sprintf");
-    expect(callPairs).toContain("main->Println");
-    expect(callPairs).toContain("main->greet");
+    expect(callPairs).toContain("main.greet->fmt.Sprintf");
+    expect(callPairs).toContain("main.main->fmt.Println");
+    expect(callPairs).toContain("main.main->main.greet");
   });
 
   it("extracts interface definitions", async () => {
@@ -507,7 +507,7 @@ type Speaker interface {
 `,
     }]);
 
-    const iface = graph.defines.find((d) => d.name === "Speaker");
+    const iface = graph.defines.find((d) => d.name === "main.Speaker");
     expect(iface).toBeDefined();
     expect(iface!.kind).toBe("interface");
   });
@@ -545,10 +545,10 @@ type myPrivate struct {}
     }]);
 
     const exportNames = graph.exports.map((e) => e.name);
-    expect(exportNames).toContain("Exported");
-    expect(exportNames).toContain("MyStruct");
-    expect(exportNames).not.toContain("unexported");
-    expect(exportNames).not.toContain("myPrivate");
+    expect(exportNames).toContain("main.Exported");
+    expect(exportNames).toContain("main.MyStruct");
+    expect(exportNames).not.toContain("main.unexported");
+    expect(exportNames).not.toContain("main.myPrivate");
   });
 
   it("extracts cross-file call graph", async () => {
@@ -582,9 +582,9 @@ func connect() {}
     ]);
 
     const callPairs = graph.calls.map((c) => `${c.caller}->${c.callee}`);
-    expect(callPairs).toContain("main->Handle");
-    expect(callPairs).toContain("Handle->Query");
-    expect(callPairs).toContain("Query->connect");
+    expect(callPairs).toContain("main.main->main.Handle");
+    expect(callPairs).toContain("main.Handle->main.Query");
+    expect(callPairs).toContain("main.Query->main.connect");
   });
 
   it("deduplicates call edges", async () => {
@@ -603,7 +603,7 @@ func b() {}
 `,
     }]);
 
-    const aToBCalls = graph.calls.filter((c) => c.caller === "a" && c.callee === "b");
+    const aToBCalls = graph.calls.filter((c) => c.caller === "main.a" && c.callee === "main.b");
     expect(aToBCalls).toHaveLength(1);
   });
 
