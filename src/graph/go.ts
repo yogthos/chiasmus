@@ -204,10 +204,15 @@ function declareLocals(node: any, scope: Map<string, string>, ctx: GoCtx): void 
       addVarSpec(node, scope, ctx);
       break;
     case "range_clause":
+    case "receive_statement":
       for (const id of namedChildrenOfType(node.childForFieldName("left"), "identifier")) setVar(scope, id.text, "");
+      break;
+    case "type_switch_statement":
+      for (const id of namedChildrenOfType(node.childForFieldName("alias"), "identifier")) setVar(scope, id.text, "");
       break;
     case "func_literal":
       addParams(node.childForFieldName("parameters"), scope, ctx);
+      addParams(node.childForFieldName("result"), scope, ctx);
       break;
   }
 }
@@ -370,6 +375,7 @@ export function walkGo(
         if (isExported(fn)) exports.push({ file: filePath, name });
         const scope = new Map<string, string>();
         addParams(node.childForFieldName("parameters"), scope, ctx);
+        addParams(node.childForFieldName("result"), scope, ctx);
         visitBody(node, name, scope);
         break;
       }
@@ -385,6 +391,7 @@ export function walkGo(
         const scope = new Map<string, string>();
         if (recv?.name) setVar(scope, recv.name, recv.type);
         addParams(node.childForFieldName("parameters"), scope, ctx);
+        addParams(node.childForFieldName("result"), scope, ctx);
         visitBody(node, name, scope);
         break;
       }

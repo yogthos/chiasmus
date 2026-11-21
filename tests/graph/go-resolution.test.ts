@@ -140,6 +140,45 @@ func run() {
     expect(pairs).toContain("a.run->fmt.Println");
   });
 
+  it("scopes named results, type-switch aliases and select receives as locals", async () => {
+    const g = await extractGraph([{
+      path: "/repo/a.go",
+      content: `
+package a
+
+type T struct{}
+func (t *T) Run() {}
+type U struct{}
+func (u *U) Run() {}
+
+func named() (r *T, err error) {
+    r.Run()
+    return
+}
+
+func sw(x any) {
+    switch v := x.(type) {
+    case *T:
+        v.Run()
+    }
+}
+
+func sel(ch chan *U) {
+    select {
+    case w := <-ch:
+        w.Run()
+    }
+}
+`,
+    }]);
+    const pairs = g.calls.map((c) => `${c.caller}->${c.callee}`);
+    expect(pairs).toContain("a.named->a.T.Run");
+    expect(pairs).not.toContain("a.named->a.U.Run");
+    expect(pairs).toContain("a.sw->a.T.Run");
+    expect(pairs).toContain("a.sel->a.U.Run");
+    expect(pairs.filter((p) => /->[rvw]\.Run$/.test(p))).toEqual([]);
+  });
+
   it("types NewT() locals and never self-links on an unknown receiver", async () => {
     const g = await extractGraph([{
       path: "/repo/a.go",
@@ -336,7 +375,7 @@ async function moduleGraph(files: Record<string, string>) {
   const root = await mkdtemp(join(tmpdir(), "chiasmus-go-mod-"));
   try {
     await writeFile(join(root, "go.mod"), "module example.com/m\n\ngo 1.22\n");
-    const batch = [];
+    const batch: Array<{ path: string; content: string }> = [];
     for (const [rel, content] of Object.entries(files)) {
       const path = join(root, rel);
       await mkdir(dirname(path), { recursive: true });
